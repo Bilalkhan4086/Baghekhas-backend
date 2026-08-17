@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import uuid
+from datetime import UTC, datetime
 from decimal import ROUND_HALF_UP, Decimal
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.enums import (
@@ -86,21 +87,24 @@ class OrderTransitionService:
                 raise DomainError(
                     409, "invalid_status_transition", "Only pending orders can be confirmed"
                 )
-            items = list(
-                (
-                    await self.session.scalars(
-                        select(OrderItem).where(OrderItem.order_id == order.id)
+            item_catalog_rows = (
+                await self.session.execute(
+                    select(
+                        OrderItem,
+                        Product.name,
+                        Product.base_price_pkr,
+                        Product.stock_policy,
                     )
-                ).all()
-            )
+                    .outerjoin(Product, Product.id == OrderItem.product_id)
+                    .where(OrderItem.order_id == order.id)
+                )
+            ).all()
             reservations = ReservationService(self.session)
             shortages = False
-            for item in items:
-                product = await self.session.get(Product, item.product_id)
+            for item, product_name, product_price, stock_policy in item_catalog_rows:
                 if (
-                    product is None
-                    or product.name != item.product_name
-                    or product.base_price_pkr != item.unit_price_pkr
+                    product_name != item.product_name
+                    or product_price != item.unit_price_pkr
                 ):
                     raise DomainError(
                         409, "stale_order_item", f"Catalog price changed for {item.product_id}"
@@ -108,7 +112,7 @@ class OrderTransitionService:
                 result = await reservations.reserve_stock_in_transaction(
                     product_id=item.product_id, quantity=item.quantity, order_id=order.id
                 )
-                policy = product.effective_stock_policy
+                policy = stock_policy or StockPolicy.ARRANGE_ON_DEMAND.value
                 if result.shortage_quantity > 0 and policy == StockPolicy.IN_STOCK_ONLY.value:
                     raise DomainError(
                         409, "insufficient_stock", f"Insufficient stock for {item.product_id}"
@@ -166,18 +170,14 @@ class OrderTransitionService:
                 raise DomainError(
                     409, "invalid_fulfillment_transition", "Order has no procurement requirement"
                 )
-            lines = list(
-                (
-                    await self.session.scalars(
-                        select(OrderFulfillmentLine).where(
-                            OrderFulfillmentLine.order_id == order.id
-                        )
-                    )
-                ).all()
+            await self.session.execute(
+                update(OrderFulfillmentLine)
+                .where(
+                    OrderFulfillmentLine.order_id == order.id,
+                    OrderFulfillmentLine.procurement_quantity > 0,
+                )
+                .values(status=FulfillmentStatus.PROCUREMENT_IN_PROGRESS.value)
             )
-            for line in lines:
-                if line.procurement_quantity > 0:
-                    line.status = FulfillmentStatus.PROCUREMENT_IN_PROGRESS.value
             order.internal_fulfillment_status = FulfillmentStatus.PROCUREMENT_IN_PROGRESS.value
             self._history(order, order.status, "Procurement started", admin_id)
         return order
@@ -197,29 +197,18 @@ class OrderTransitionService:
                 raise DomainError(
                     409, "invalid_fulfillment_transition", "Order is not awaiting procurement"
                 )
-            lines = list(
-                (
-                    await self.session.scalars(
-                        select(OrderFulfillmentLine).where(
-                            OrderFulfillmentLine.order_id == order.id
-                        )
-                    )
-                ).all()
-            )
-            items = {
-                item.id: item
-                for item in (
-                    await self.session.scalars(
-                        select(OrderItem).where(OrderItem.order_id == order.id)
-                    )
-                ).all()
-            }
+            line_item_rows = (
+                await self.session.execute(
+                    select(OrderFulfillmentLine, OrderItem)
+                    .join(OrderItem, OrderItem.id == OrderFulfillmentLine.order_item_id)
+                    .where(OrderFulfillmentLine.order_id == order.id)
+                )
+            ).all()
             reservations = ReservationService(self.session)
             incomplete = False
-            for line in lines:
+            for line, item in line_item_rows:
                 if line.procurement_quantity <= 0:
                     continue
-                item = items[line.order_item_id]
                 result = await reservations.reserve_stock_in_transaction(
                     product_id=item.product_id,
                     quantity=line.procurement_quantity,
@@ -285,8 +274,6 @@ class OrderTransitionService:
                     409, "invalid_status_transition", "Only dispatched orders can be started"
                 )
             if order.rider_started_at is None:
-                from datetime import UTC, datetime
-
                 order.rider_started_at = datetime.now(UTC)
                 self._history(order, order.status, "Rider started delivery", None)
         return order

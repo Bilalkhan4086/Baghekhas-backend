@@ -6,7 +6,7 @@ Only this module mutates inventory batches or appends batch-aware movement rows.
 from __future__ import annotations
 
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import UTC, date, datetime, time
 from decimal import Decimal
 
@@ -16,13 +16,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.enums import (
-    FulfillmentStatus,
-    InventoryMode,
     InventoryMovementType,
     InventoryReason,
     InventoryReservationStatus,
-    OrderStatus,
-    PublicationStatus,
     PurchaseCostAllocationMethod,
     PurchaseStatus,
     WasteReason,
@@ -33,8 +29,6 @@ from app.models import (
     InventoryMovement,
     InventoryReservation,
     Order,
-    OrderFulfillmentLine,
-    OrderItem,
     Product,
     Purchase,
     PurchaseCost,
@@ -54,6 +48,7 @@ from app.schemas.inventory import (
     WastePage,
     WasteRecordResponse,
 )
+from app.services.procurement import ProcurementReadService
 
 ZERO = Decimal("0")
 
@@ -91,42 +86,6 @@ class ReservationResult:
     reservation_ids: list[uuid.UUID]
     reserved_quantity: Decimal
     shortage_quantity: Decimal
-
-
-@dataclass
-class _ProcurementDemand:
-    confirmed_shortage: Decimal = ZERO
-    pending_quantity: Decimal = ZERO
-    confirmed_order_ids: list[uuid.UUID] = field(default_factory=list)
-    pending_order_ids: list[uuid.UUID] = field(default_factory=list)
-    procurement_in_progress: bool = False
-
-
-@dataclass(frozen=True)
-class _ProcurementProjection:
-    projected_stock: Decimal
-    order_shortage: Decimal
-    low_stock_replenishment: Decimal
-    suggested_purchase: Decimal
-
-
-def _project_procurement(
-    *,
-    current_stock: Decimal,
-    low_stock_threshold: Decimal,
-    confirmed_shortage: Decimal,
-    pending_quantity: Decimal,
-) -> _ProcurementProjection:
-    outstanding_order_demand = confirmed_shortage + pending_quantity
-    projected_stock = max(current_stock - outstanding_order_demand, ZERO)
-    order_shortage = max(outstanding_order_demand - current_stock, ZERO)
-    low_stock_replenishment = max(low_stock_threshold - projected_stock, ZERO)
-    return _ProcurementProjection(
-        projected_stock=projected_stock,
-        order_shortage=order_shortage,
-        low_stock_replenishment=low_stock_replenishment,
-        suggested_purchase=order_shortage + low_stock_replenishment,
-    )
 
 
 @dataclass(frozen=True)
@@ -547,6 +506,7 @@ class PurchaseService:
                 overhead = item.manual_overhead or ZERO
                 effective_cost = (item.line_cost + overhead) / item.quantity
                 batch = InventoryBatch(
+                    id=uuid.uuid4(),
                     product_id=item.product_id,
                     purchase_item_id=item.id,
                     received_quantity=item.quantity,
@@ -556,7 +516,6 @@ class PurchaseService:
                     received_at=receipt_time,
                 )
                 self.session.add(batch)
-                await self.session.flush()
                 self.session.add(
                     _movement(
                         product_id=item.product_id,
@@ -569,9 +528,9 @@ class PurchaseService:
                         actor_admin_id=purchase.created_by_id,
                     )
                 )
-                await _sync_available_quantity(self.session, product)
             purchase.status = PurchaseStatus.RECEIVED.value
-            for product_id in products:
+            for product_id, product in products.items():
+                await _sync_available_quantity(self.session, product)
                 await InventoryService(self.session).recheck_procurement_requirements(product_id)
         return purchase
 
@@ -772,91 +731,7 @@ class InventoryReadService:
         )
 
     async def procurement_requirements(self) -> list[ProcurementRequirementResponse]:
-        fulfillment_rows = (
-            await self.session.execute(
-                select(OrderFulfillmentLine, OrderItem)
-                .join(OrderItem, OrderItem.id == OrderFulfillmentLine.order_item_id)
-                .where(
-                    OrderFulfillmentLine.status.in_(
-                        {
-                            FulfillmentStatus.PROCUREMENT_REQUIRED.value,
-                            FulfillmentStatus.PROCUREMENT_IN_PROGRESS.value,
-                        }
-                    ),
-                    OrderFulfillmentLine.procurement_quantity > ZERO,
-                )
-                .order_by(OrderFulfillmentLine.order_id.asc())
-            )
-        ).all()
-        demand_by_product: dict[str, _ProcurementDemand] = {}
-        for line, item in fulfillment_rows:
-            demand = demand_by_product.setdefault(item.product_id, _ProcurementDemand())
-            demand.confirmed_shortage += line.procurement_quantity
-            if line.order_id not in demand.confirmed_order_ids:
-                demand.confirmed_order_ids.append(line.order_id)
-            if line.status == FulfillmentStatus.PROCUREMENT_IN_PROGRESS.value:
-                demand.procurement_in_progress = True
-
-        pending_rows = (
-            await self.session.execute(
-                select(OrderItem, Order)
-                .join(Order, Order.id == OrderItem.order_id)
-                .where(Order.status == OrderStatus.PENDING.value)
-                .order_by(Order.created_at.asc(), Order.id.asc(), OrderItem.id.asc())
-            )
-        ).all()
-        for item, order in pending_rows:
-            demand = demand_by_product.setdefault(item.product_id, _ProcurementDemand())
-            demand.pending_quantity += item.quantity
-            if order.id not in demand.pending_order_ids:
-                demand.pending_order_ids.append(order.id)
-
-        products = (
-            await self.session.scalars(
-                select(Product)
-                .where(Product.inventory_mode == InventoryMode.TRACKED.value)
-                .order_by(Product.name.asc(), Product.id.asc())
-            )
-        ).all()
-        requirements: list[ProcurementRequirementResponse] = []
-        for product in products:
-            demand = demand_by_product.get(product.id, _ProcurementDemand())
-            projection = _project_procurement(
-                current_stock=product.stock_quantity,
-                low_stock_threshold=product.low_stock_threshold,
-                confirmed_shortage=demand.confirmed_shortage,
-                pending_quantity=demand.pending_quantity,
-            )
-            should_replenish = (
-                product.publication_status != PublicationStatus.ARCHIVED.value
-                and projection.projected_stock <= product.low_stock_threshold
-            )
-            if projection.order_shortage <= ZERO and not should_replenish:
-                continue
-
-            order_ids = list(demand.confirmed_order_ids)
-            order_ids.extend(
-                order_id for order_id in demand.pending_order_ids if order_id not in order_ids
-            )
-            requirements.append(
-                ProcurementRequirementResponse(
-                    product_id=product.id,
-                    product_name=product.name,
-                    unit_label=product.unit_label,
-                    current_stock_quantity=product.stock_quantity,
-                    projected_stock_quantity=projection.projected_stock,
-                    pending_order_quantity=demand.pending_quantity,
-                    shortage_quantity=projection.order_shortage,
-                    low_stock_replenishment_quantity=projection.low_stock_replenishment,
-                    suggested_purchase_quantity=projection.suggested_purchase,
-                    low_stock_threshold=product.low_stock_threshold,
-                    affected_order_count=len(order_ids),
-                    pending_order_count=len(demand.pending_order_ids),
-                    procurement_in_progress=demand.procurement_in_progress,
-                    order_ids=order_ids,
-                )
-            )
-        return requirements
+        return await ProcurementReadService(self.session).requirements()
 
     @staticmethod
     def _purchase_response(
@@ -1022,6 +897,7 @@ class InventoryLifecycleService:
             product.stock_quantity = ZERO
             return None
         batch = InventoryBatch(
+            id=uuid.uuid4(),
             product_id=product_id,
             received_quantity=quantity,
             remaining_quantity=quantity,
@@ -1030,7 +906,6 @@ class InventoryLifecycleService:
             received_at=datetime.now(UTC),
         )
         self.session.add(batch)
-        await self.session.flush()
         movement = _movement(
             product_id=product_id,
             batch=batch,
@@ -1096,6 +971,7 @@ class InventoryLifecycleService:
             if opening_quantity == ZERO:
                 return product
             batch = InventoryBatch(
+                id=uuid.uuid4(),
                 product_id=product_id,
                 received_quantity=opening_quantity,
                 remaining_quantity=opening_quantity,
@@ -1104,7 +980,6 @@ class InventoryLifecycleService:
                 received_at=datetime.now(UTC),
             )
             self.session.add(batch)
-            await self.session.flush()
             self.session.add(
                 _movement(
                     product_id=product_id,
@@ -1147,6 +1022,7 @@ class ReservationService:
         reservation_ids: list[uuid.UUID] = []
         for allocation in allocations:
             reservation = InventoryReservation(
+                id=uuid.uuid4(),
                 order_id=order_id,
                 product_id=product_id,
                 batch_id=allocation.batch.id,
@@ -1155,7 +1031,6 @@ class ReservationService:
                 status=InventoryReservationStatus.ACTIVE.value,
             )
             self.session.add(reservation)
-            await self.session.flush()
             reservation_ids.append(reservation.id)
             self.session.add(
                 _movement(
@@ -1333,6 +1208,7 @@ class WasteService:
             )
             for allocation in allocations:
                 record = WasteRecord(
+                    id=uuid.uuid4(),
                     product_id=product_id,
                     batch_id=allocation.batch.id,
                     quantity=allocation.quantity,
@@ -1342,7 +1218,6 @@ class WasteService:
                     admin_id=admin_id,
                 )
                 self.session.add(record)
-                await self.session.flush()
                 records.append(record)
                 self.session.add(
                     _movement(
@@ -1394,6 +1269,7 @@ class WasteService:
                 product = await _locked_product(self.session, product_id)
                 await _materialize_legacy_balance(self.session, product)
                 batch = InventoryBatch(
+                    id=uuid.uuid4(),
                     product_id=product_id,
                     received_quantity=quantity_delta,
                     remaining_quantity=quantity_delta,
@@ -1402,7 +1278,6 @@ class WasteService:
                     received_at=datetime.now(UTC),
                 )
                 self.session.add(batch)
-                await self.session.flush()
                 movement = _movement(
                     product_id=product_id,
                     batch=batch,

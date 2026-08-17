@@ -123,6 +123,33 @@ async def test_dispatch_preserves_an_existing_active_assignment(
 
 
 @pytest.mark.asyncio
+async def test_start_procurement_updates_shortage_lines_in_one_statement() -> None:
+    order_id = uuid.uuid4()
+    admin_id = uuid.uuid4()
+    confirmed_order = Order(
+        id=order_id,
+        customer_phone="+923001234567",
+        status=OrderStatus.CONFIRMED.value,
+        internal_fulfillment_status=FulfillmentStatus.PROCUREMENT_REQUIRED.value,
+        subtotal_pkr=0,
+        delivery_charge_pkr=0,
+        total_pkr=0,
+    )
+    session = _SessionStub()
+    session.execute = AsyncMock()  # type: ignore[attr-defined]
+    service = OrderTransitionService(session)  # type: ignore[arg-type]
+    service._locked_order = AsyncMock(return_value=confirmed_order)  # type: ignore[method-assign]
+
+    updated = await service.mark_procurement_in_progress(order_id, admin_id)
+
+    session.execute.assert_awaited_once()  # type: ignore[attr-defined]
+    assert (
+        updated.internal_fulfillment_status
+        == FulfillmentStatus.PROCUREMENT_IN_PROGRESS.value
+    )
+
+
+@pytest.mark.asyncio
 async def test_admin_reassignment_accepts_active_rider_outside_order_zone(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
