@@ -46,6 +46,7 @@ from app.services.delivery import (
     DeliveryScheduleService,
     DeliveryZoneService,
     RiderAssignmentService,
+    RiderService,
 )
 from app.services.inventory import (
     CostingService,
@@ -552,29 +553,66 @@ async def test_delivery_zone_schedule_and_rider_assignment() -> None:
                 ],
             },
         )
-        active = Rider(id=uuid.uuid4(), name="Active", phone="03001112222", is_active=True)
-        inactive = Rider(id=uuid.uuid4(), name="Inactive", phone="03003334444", is_active=False)
+        busy = Rider(id=uuid.uuid4(), name="Busy", phone="03001112222", is_active=True)
+        quieter = Rider(id=uuid.uuid4(), name="Quieter", phone="03002223333", is_active=True)
+        least_loaded = Rider(
+            id=uuid.uuid4(), name="Least loaded", phone="03003334444", is_active=True
+        )
+        inactive = Rider(id=uuid.uuid4(), name="Inactive", phone="03004445555", is_active=False)
         admin = AdminUser(
             id=uuid.uuid4(),
             email="delivery-assignment@example.com",
             password_hash="unused",
         )
         customer = Customer(phone="+923008888888", name="Ayesha", address="Lahore")
+        assignment_date = date(2026, 8, 16)
         order = Order(
             id=uuid.uuid4(),
             customer_phone=customer.phone,
+            customer_name_snapshot=customer.name,
+            delivery_address_snapshot=customer.address,
             status="pending",
             subtotal_pkr=0,
             delivery_charge_pkr=0,
             total_pkr=0,
+            promised_delivery_date=assignment_date,
         )
-        session.add_all([zone, active, inactive, admin, customer, order])
+        session.add_all([zone, busy, quieter, least_loaded, inactive, admin, customer, order])
         await session.flush()
         order.delivery_zone_id = zone.id
+        daily_orders = [
+            Order(
+                customer_phone=customer.phone,
+                customer_name_snapshot=customer.name,
+                delivery_address_snapshot=customer.address,
+                status="pending",
+                subtotal_pkr=0,
+                delivery_charge_pkr=0,
+                total_pkr=0,
+                promised_delivery_date=assignment_date,
+                rider_id=rider_id,
+            )
+            for rider_id in [busy.id, busy.id, quieter.id]
+        ]
+        future_order = Order(
+            customer_phone=customer.phone,
+            customer_name_snapshot=customer.name,
+            delivery_address_snapshot=customer.address,
+            status="pending",
+            subtotal_pkr=0,
+            delivery_charge_pkr=0,
+            total_pkr=0,
+            promised_delivery_date=assignment_date + timedelta(days=1),
+            rider_id=least_loaded.id,
+        )
         session.add_all(
             [
-                RiderZone(rider_id=active.id, zone_id=zone.id),
+                RiderZone(rider_id=busy.id, zone_id=zone.id),
+                RiderZone(rider_id=quieter.id, zone_id=zone.id),
+                RiderZone(rider_id=least_loaded.id, zone_id=zone.id),
                 RiderZone(rider_id=inactive.id, zone_id=zone.id),
+                *daily_orders,
+                future_order,
             ]
         )
         await session.commit()
@@ -583,14 +621,62 @@ async def test_delivery_zone_schedule_and_rider_assignment() -> None:
         assert (await zones.resolve_zone(31.45, 74.25)).id == zone.id
         assert await zones.resolve_zone(31.80, 74.80) is None
         order_id = order.id
-        active_id = active.id
+        busy_id = busy.id
+        least_loaded_id = least_loaded.id
         admin_id = admin.id
         await session.rollback()
         assignment = RiderAssignmentService(session)
         assigned = await assignment.assign_rider(order_id)
-        assert assigned is not None and assigned.id == active_id
-        reassigned = await assignment.reassign_rider(order_id, active_id, admin_id)
-        assert reassigned.rider_id == active_id
+        assert assigned is not None and assigned.id == least_loaded_id
+        reassigned = await assignment.reassign_rider(order_id, busy_id, admin_id)
+        assert reassigned.rider_id == busy_id
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_replacing_rider_zones_deletes_old_memberships() -> None:
+    assert TEST_DATABASE_URL is not None
+    await reset_database()
+    await asyncio.to_thread(run_migrations)
+    engine = create_async_engine(async_url(TEST_DATABASE_URL))
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+
+    async with factory() as session:
+        original_zone = DeliveryZone(name="Original zone")
+        retained_zone = DeliveryZone(name="Retained zone")
+        replacement_zone = DeliveryZone(name="Replacement zone")
+        rider = Rider(
+            name="Zone replacement rider",
+            phone="03005556666",
+            is_active=True,
+        )
+        session.add_all([original_zone, retained_zone, replacement_zone, rider])
+        await session.flush()
+        session.add_all(
+            [
+                RiderZone(rider_id=rider.id, zone_id=original_zone.id),
+                RiderZone(rider_id=rider.id, zone_id=retained_zone.id),
+            ]
+        )
+        await session.commit()
+
+        updated = await RiderService(session).set_rider_zones(
+            rider.id,
+            [retained_zone.id, replacement_zone.id, retained_zone.id],
+        )
+
+        expected_zone_ids = {retained_zone.id, replacement_zone.id}
+        assert {membership.zone_id for membership in updated.rider_zones} == expected_zone_ids
+        memberships = list(
+            (
+                await session.scalars(
+                    select(RiderZone).where(RiderZone.rider_id == rider.id)
+                )
+            ).all()
+        )
+        assert {membership.zone_id for membership in memberships} == expected_zone_ids
+        assert len(memberships) == 2
+
     await engine.dispose()
 
 

@@ -10,6 +10,7 @@ from app.exceptions import DomainError
 from app.models import Order
 from app.schemas.common import Page
 from app.schemas.orders import (
+    AdminOrderCreate,
     CancellationRequest,
     DeliveryLocationInput,
     DeliveryQuoteResponse,
@@ -18,7 +19,6 @@ from app.schemas.orders import (
     NotReceivedRequest,
     OrderActionsResponse,
     OrderAdminUpdate,
-    OrderCreate,
     OrderResponse,
     OrderStatusHistoryResponse,
     OrderSummaryResponse,
@@ -69,7 +69,7 @@ async def list_orders(
 
 @router.post("", response_model=OrderResponse, status_code=status.HTTP_201_CREATED)
 async def add_order(
-    payload: OrderCreate,
+    payload: AdminOrderCreate,
     request: Request,
     response: Response,
     session: SessionDep,
@@ -84,6 +84,7 @@ async def add_order(
         user_agent=request.headers.get("user-agent"),
         delivery_cutoff_hour=settings.delivery_cutoff_hour,
         delivery_default_time=settings.delivery_default_time,
+        delivery_charge_override_pkr=payload.delivery_charge_pkr,
     )
     if not created:
         response.status_code = status.HTTP_200_OK

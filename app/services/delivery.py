@@ -7,7 +7,7 @@ from datetime import UTC, date, datetime, time, timedelta
 from typing import cast
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -237,33 +237,39 @@ class RiderService:
         return rider
 
     async def set_rider_zones(self, rider_id: uuid.UUID, zone_ids: list[uuid.UUID]) -> Rider:
+        unique_zone_ids = list(dict.fromkeys(zone_ids))
         async with self.session.begin():
             rider = await self.session.scalar(
-                select(Rider)
-                .where(Rider.id == rider_id)
-                .options(selectinload(Rider.rider_zones))
-                .with_for_update()
+                select(Rider).where(Rider.id == rider_id).with_for_update()
             )
             if rider is None:
                 raise not_found("Rider")
             zones = list(
                 (
                     await self.session.scalars(
-                        select(DeliveryZone).where(DeliveryZone.id.in_(zone_ids))
+                        select(DeliveryZone).where(DeliveryZone.id.in_(unique_zone_ids))
                     )
                 ).all()
             )
-            if len(zones) != len(set(zone_ids)):
+            if len(zones) != len(unique_zone_ids):
                 raise DomainError(422, "invalid_zone", "One or more delivery zones do not exist")
-            rider.rider_zones.clear()
-            rider.rider_zones.extend(
-                RiderZone(zone_id=zone_id) for zone_id in dict.fromkeys(zone_ids)
+
+            # Execute the delete before staging replacements. ORM collection replacement can
+            # flush inserts first and violate the unique key when a requested zone is retained.
+            await self.session.execute(
+                delete(RiderZone).where(RiderZone.rider_id == rider.id)
             )
+            self.session.add_all(
+                RiderZone(rider_id=rider.id, zone_id=zone_id)
+                for zone_id in unique_zone_ids
+            )
+            await self.session.flush()
+            await self.session.refresh(rider, attribute_names=["rider_zones"])
         return rider
 
 
 class RiderAssignmentService:
-    """Assigns active zone riders by fewest dispatched orders for the current Karachi day."""
+    """Assigns active zone riders by scheduled workload for the promised delivery date."""
 
     def __init__(self, session: AsyncSession) -> None:
         self.session = session
@@ -295,15 +301,17 @@ class RiderAssignmentService:
                         Rider.is_active.is_(True),
                     )
                     .order_by(Rider.id)
+                    .with_for_update(of=Rider)
                 )
             ).all()
         )
         if not riders:
             return None
-        loads = {
-            rider.id: await self.get_rider_daily_load(rider.id, datetime.now(KARACHI).date())
-            for rider in riders
-        }
+        assignment_date = order.promised_delivery_date or datetime.now(KARACHI).date()
+        loads = await self.get_rider_daily_loads(
+            [rider.id for rider in riders],
+            assignment_date,
+        )
         return min(riders, key=lambda candidate: (loads[candidate.id], candidate.id))
 
     async def require_active_rider(self, rider_id: uuid.UUID) -> Rider:
@@ -332,19 +340,31 @@ class RiderAssignmentService:
         return rider
 
     async def get_rider_daily_load(self, rider_id: uuid.UUID, on_date: date) -> int:
-        """Read dispatched orders assigned to a rider for one Karachi calendar date."""
-        return int(
-            await self.session.scalar(
-                select(func.count())
-                .select_from(Order)
+        """Read non-cancelled orders assigned to a rider for one promised date."""
+        loads = await self.get_rider_daily_loads([rider_id], on_date)
+        return loads[rider_id]
+
+    async def get_rider_daily_loads(
+        self,
+        rider_ids: list[uuid.UUID],
+        on_date: date,
+    ) -> dict[uuid.UUID, int]:
+        """Read scheduled daily loads for eligible riders in one aggregate query."""
+        rows = (
+            await self.session.execute(
+                select(Order.rider_id, func.count(Order.id))
                 .where(
-                    Order.rider_id == rider_id,
-                    Order.status == "dispatched",
-                    func.date(Order.created_at) == on_date,
+                    Order.rider_id.in_(rider_ids),
+                    Order.promised_delivery_date == on_date,
+                    Order.status != "cancelled",
                 )
+                .group_by(Order.rider_id)
             )
-            or 0
-        )
+        ).all()
+        loads: dict[uuid.UUID, int] = {
+            rider_id: int(load) for rider_id, load in rows if rider_id is not None
+        }
+        return {rider_id: int(loads.get(rider_id, 0)) for rider_id in rider_ids}
 
     async def reassign_rider(
         self, order_id: uuid.UUID, new_rider_id: uuid.UUID, admin_id: uuid.UUID

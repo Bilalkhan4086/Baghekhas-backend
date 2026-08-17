@@ -71,6 +71,10 @@ class OrderCreate(APIModel):
         return self
 
 
+class AdminOrderCreate(OrderCreate):
+    delivery_charge_pkr: int | None = Field(default=None, ge=0, le=100_000_000)
+
+
 class CustomerResponse(APIModel):
     phone: str
     name: str

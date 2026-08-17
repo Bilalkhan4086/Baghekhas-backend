@@ -705,7 +705,11 @@ class Rider(Base):
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
 
-    rider_zones: Mapped[list[RiderZone]] = relationship(back_populates="rider", lazy="raise")
+    rider_zones: Mapped[list[RiderZone]] = relationship(
+        back_populates="rider",
+        cascade="all, delete-orphan",
+        lazy="raise",
+    )
 
 
 class RiderZone(Base):

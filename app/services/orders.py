@@ -99,7 +99,15 @@ def calculate_delivery_quote(latitude: Decimal, longitude: Decimal) -> tuple[Dec
     return stored_distance, calculate_delivery_charge(raw_distance)
 
 
-def build_request_hash(payload: OrderCreate, normalized_phone: str) -> str:
+def resolve_delivery_charge(calculated_charge_pkr: int, override_pkr: int | None) -> int:
+    return override_pkr if override_pkr is not None else calculated_charge_pkr
+
+
+def build_request_hash(
+    payload: OrderCreate,
+    normalized_phone: str,
+    delivery_charge_override_pkr: int | None = None,
+) -> str:
     canonical = {
         "customer": {
             "name": payload.customer.name,
@@ -119,6 +127,8 @@ def build_request_hash(payload: OrderCreate, normalized_phone: str) -> str:
             key=lambda item: item["product_id"],
         ),
     }
+    if delivery_charge_override_pkr is not None:
+        canonical["delivery_charge_override_pkr"] = delivery_charge_override_pkr
     encoded = json.dumps(canonical, sort_keys=True, separators=(",", ":")).encode()
     return hashlib.sha256(encoded).hexdigest()
 
@@ -163,9 +173,10 @@ async def create_order(
     user_agent: str | None,
     delivery_cutoff_hour: int = 15,
     delivery_default_time: time = time(18, 0),
+    delivery_charge_override_pkr: int | None = None,
 ) -> tuple[Order, bool]:
     phone = normalize_pakistani_phone(payload.customer.phone)
-    request_hash = build_request_hash(payload, phone)
+    request_hash = build_request_hash(payload, phone, delivery_charge_override_pkr)
     existing = await get_order_by_idempotency_key(session, idempotency_key)
     if existing is not None:
         if existing.request_hash != request_hash:
@@ -254,9 +265,13 @@ async def create_order(
         saved_address.longitude = payload.delivery_location.longitude
         saved_address.is_default = True
 
-    delivery_distance_km, delivery_charge_pkr = calculate_delivery_quote(
+    delivery_distance_km, calculated_delivery_charge_pkr = calculate_delivery_quote(
         payload.delivery_location.latitude,
         payload.delivery_location.longitude,
+    )
+    delivery_charge_pkr = resolve_delivery_charge(
+        calculated_delivery_charge_pkr,
+        delivery_charge_override_pkr,
     )
     delivery_zone = await DeliveryZoneService(session).resolve_zone(
         float(payload.delivery_location.latitude),

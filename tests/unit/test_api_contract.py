@@ -53,6 +53,26 @@ def test_openapi_contains_public_and_admin_routes() -> None:
     assert "/api/v1/admin/customers/{customer_phone}" in paths
 
 
+def test_delivery_charge_override_is_admin_only() -> None:
+    schema = app.openapi()
+    paths = schema["paths"]
+    public_body = paths["/api/v1/orders"]["post"]["requestBody"]["content"][
+        "application/json"
+    ]["schema"]
+    admin_body = paths["/api/v1/admin/orders"]["post"]["requestBody"]["content"][
+        "application/json"
+    ]["schema"]
+
+    assert public_body["$ref"].endswith("/OrderCreate")
+    assert admin_body["$ref"].endswith("/AdminOrderCreate")
+    assert "delivery_charge_pkr" not in schema["components"]["schemas"]["OrderCreate"][
+        "properties"
+    ]
+    assert "delivery_charge_pkr" in schema["components"]["schemas"]["AdminOrderCreate"][
+        "properties"
+    ]
+
+
 def test_public_catalog_schema_excludes_operations_fields() -> None:
     schema = app.openapi()
     fields = schema["components"]["schemas"]["CatalogProductResponse"]["properties"]

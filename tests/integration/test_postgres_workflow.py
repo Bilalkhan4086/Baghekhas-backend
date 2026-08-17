@@ -384,6 +384,18 @@ async def test_order_is_idempotent_and_never_changes_stock() -> None:
         assert created_order.promised_delivery_date is not None
         assert created_order.promised_delivery_time == time(18, 0)
 
+        overridden_order, overridden_created = await create_order(
+            session,
+            payload,
+            idempotency_key=uuid.uuid4(),
+            user_agent="pytest",
+            delivery_charge_override_pkr=75,
+        )
+        assert overridden_created is True
+        assert overridden_order.subtotal_pkr == 625
+        assert overridden_order.delivery_charge_pkr == 75
+        assert overridden_order.total_pkr == 700
+
         rescheduled = await update_order(
             session,
             created_order.id,

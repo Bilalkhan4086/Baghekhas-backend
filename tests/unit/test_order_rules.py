@@ -1,7 +1,7 @@
 import uuid
-from datetime import time
+from datetime import datetime, time
 from decimal import Decimal
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -9,6 +9,7 @@ from app.enums import ORDER_TRANSITIONS, OrderStatus
 from app.exceptions import DomainError
 from app.models import Order, Rider
 from app.schemas.orders import (
+    AdminOrderCreate,
     CustomerInput,
     DeliveryLocationInput,
     OrderAdminUpdate,
@@ -25,6 +26,7 @@ from app.services.orders import (
     calculate_delivery_quote,
     calculate_line_total,
     normalize_pakistani_phone,
+    resolve_delivery_charge,
 )
 
 DELIVERY_LOCATION = DeliveryLocationInput(
@@ -54,6 +56,36 @@ async def test_new_order_is_assigned_to_zone_rider(
 
     select_rider.assert_awaited_once_with(order)
     assert order.rider_id == rider.id
+
+
+@pytest.mark.asyncio
+async def test_zone_assignment_uses_promised_date_and_least_scheduled_load(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    riders = [
+        Rider(id=uuid.uuid4(), name="Busy", phone="03001112222", is_active=True),
+        Rider(id=uuid.uuid4(), name="Quieter", phone="03002223333", is_active=True),
+        Rider(id=uuid.uuid4(), name="Least", phone="03003334444", is_active=True),
+    ]
+    scalar_result = MagicMock()
+    scalar_result.all.return_value = riders
+    session = MagicMock()
+    session.scalars = AsyncMock(return_value=scalar_result)
+    assignment = RiderAssignmentService(session)
+    scheduled_date = datetime(2026, 8, 20).date()
+    daily_loads = AsyncMock(
+        return_value={riders[0].id: 2, riders[1].id: 1, riders[2].id: 0}
+    )
+    monkeypatch.setattr(assignment, "get_rider_daily_loads", daily_loads)
+    order = Order(
+        delivery_zone_id=uuid.uuid4(),
+        promised_delivery_date=scheduled_date,
+    )
+
+    selected = await assignment.select_rider_for_order(order)
+
+    assert selected.id == riders[2].id
+    daily_loads.assert_awaited_once_with([rider.id for rider in riders], scheduled_date)
 
 
 @pytest.mark.parametrize(
@@ -193,6 +225,12 @@ def test_delivery_quote_at_origin_is_free() -> None:
     assert charge == 0
 
 
+def test_admin_delivery_charge_override_replaces_calculated_charge() -> None:
+    assert resolve_delivery_charge(100, None) == 100
+    assert resolve_delivery_charge(100, 75) == 75
+    assert resolve_delivery_charge(100, 0) == 0
+
+
 def test_delivery_location_rejects_out_of_range_coordinates() -> None:
     with pytest.raises(ValueError):
         DeliveryLocationInput(latitude="91", longitude="74")
@@ -211,3 +249,26 @@ def test_request_hash_changes_with_delivery_location() -> None:
         items=[OrderItemInput(product_id="mango", quantity="1")],
     )
     assert build_request_hash(first, "+923001234567") != build_request_hash(second, "+923001234567")
+
+
+def test_admin_delivery_charge_override_is_validated_and_hashed() -> None:
+    payload = AdminOrderCreate(
+        customer=CustomerInput(name="Ayesha", phone="03001234567", address="Lahore"),
+        delivery_location=DELIVERY_LOCATION,
+        items=[OrderItemInput(product_id="mango", quantity="1")],
+        delivery_charge_pkr=75,
+    )
+    assert payload.delivery_charge_pkr == 75
+    assert build_request_hash(payload, "+923001234567") != build_request_hash(
+        payload,
+        "+923001234567",
+        payload.delivery_charge_pkr,
+    )
+
+    with pytest.raises(ValueError):
+        AdminOrderCreate(
+            customer=payload.customer,
+            delivery_location=payload.delivery_location,
+            items=payload.items,
+            delivery_charge_pkr=-1,
+        )
