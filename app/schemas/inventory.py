@@ -184,8 +184,17 @@ class WasteResultResponse(APIModel):
 class ProcurementRequirementResponse(APIModel):
     product_id: str
     product_name: str
+    unit_label: str
+    current_stock_quantity: Quantity
+    projected_stock_quantity: Quantity
+    pending_order_quantity: Quantity
     shortage_quantity: Quantity
+    low_stock_replenishment_quantity: Quantity
+    suggested_purchase_quantity: Quantity
+    low_stock_threshold: Quantity
     affected_order_count: int
+    pending_order_count: int
+    procurement_in_progress: bool
     order_ids: list[uuid.UUID]
 
 

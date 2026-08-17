@@ -6,7 +6,7 @@ Only this module mutates inventory batches or appends batch-aware movement rows.
 from __future__ import annotations
 
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, time
 from decimal import Decimal
 
@@ -16,9 +16,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.enums import (
+    FulfillmentStatus,
+    InventoryMode,
     InventoryMovementType,
     InventoryReason,
     InventoryReservationStatus,
+    OrderStatus,
+    PublicationStatus,
     PurchaseCostAllocationMethod,
     PurchaseStatus,
     WasteReason,
@@ -87,6 +91,42 @@ class ReservationResult:
     reservation_ids: list[uuid.UUID]
     reserved_quantity: Decimal
     shortage_quantity: Decimal
+
+
+@dataclass
+class _ProcurementDemand:
+    confirmed_shortage: Decimal = ZERO
+    pending_quantity: Decimal = ZERO
+    confirmed_order_ids: list[uuid.UUID] = field(default_factory=list)
+    pending_order_ids: list[uuid.UUID] = field(default_factory=list)
+    procurement_in_progress: bool = False
+
+
+@dataclass(frozen=True)
+class _ProcurementProjection:
+    projected_stock: Decimal
+    order_shortage: Decimal
+    low_stock_replenishment: Decimal
+    suggested_purchase: Decimal
+
+
+def _project_procurement(
+    *,
+    current_stock: Decimal,
+    low_stock_threshold: Decimal,
+    confirmed_shortage: Decimal,
+    pending_quantity: Decimal,
+) -> _ProcurementProjection:
+    outstanding_order_demand = confirmed_shortage + pending_quantity
+    projected_stock = max(current_stock - outstanding_order_demand, ZERO)
+    order_shortage = max(outstanding_order_demand - current_stock, ZERO)
+    low_stock_replenishment = max(low_stock_threshold - projected_stock, ZERO)
+    return _ProcurementProjection(
+        projected_stock=projected_stock,
+        order_shortage=order_shortage,
+        low_stock_replenishment=low_stock_replenishment,
+        suggested_purchase=order_shortage + low_stock_replenishment,
+    )
 
 
 @dataclass(frozen=True)
@@ -732,41 +772,91 @@ class InventoryReadService:
         )
 
     async def procurement_requirements(self) -> list[ProcurementRequirementResponse]:
-        rows = (
+        fulfillment_rows = (
             await self.session.execute(
-                select(OrderFulfillmentLine, OrderItem, Product)
+                select(OrderFulfillmentLine, OrderItem)
                 .join(OrderItem, OrderItem.id == OrderFulfillmentLine.order_item_id)
-                .join(Product, Product.id == OrderItem.product_id)
                 .where(
-                    OrderFulfillmentLine.status == "procurement_required",
+                    OrderFulfillmentLine.status.in_(
+                        {
+                            FulfillmentStatus.PROCUREMENT_REQUIRED.value,
+                            FulfillmentStatus.PROCUREMENT_IN_PROGRESS.value,
+                        }
+                    ),
                     OrderFulfillmentLine.procurement_quantity > ZERO,
                 )
-                .order_by(Product.name.asc(), OrderFulfillmentLine.order_id.asc())
+                .order_by(OrderFulfillmentLine.order_id.asc())
             )
         ).all()
-        requirements: dict[str, tuple[str, Decimal, list[uuid.UUID]]] = {}
-        for line, item, product in rows:
-            product_name, shortage_quantity, order_ids = requirements.get(
-                item.product_id,
-                (product.name, ZERO, []),
+        demand_by_product: dict[str, _ProcurementDemand] = {}
+        for line, item in fulfillment_rows:
+            demand = demand_by_product.setdefault(item.product_id, _ProcurementDemand())
+            demand.confirmed_shortage += line.procurement_quantity
+            if line.order_id not in demand.confirmed_order_ids:
+                demand.confirmed_order_ids.append(line.order_id)
+            if line.status == FulfillmentStatus.PROCUREMENT_IN_PROGRESS.value:
+                demand.procurement_in_progress = True
+
+        pending_rows = (
+            await self.session.execute(
+                select(OrderItem, Order)
+                .join(Order, Order.id == OrderItem.order_id)
+                .where(Order.status == OrderStatus.PENDING.value)
+                .order_by(Order.created_at.asc(), Order.id.asc(), OrderItem.id.asc())
             )
-            if line.order_id not in order_ids:
-                order_ids.append(line.order_id)
-            requirements[item.product_id] = (
-                product_name,
-                shortage_quantity + line.procurement_quantity,
-                order_ids,
+        ).all()
+        for item, order in pending_rows:
+            demand = demand_by_product.setdefault(item.product_id, _ProcurementDemand())
+            demand.pending_quantity += item.quantity
+            if order.id not in demand.pending_order_ids:
+                demand.pending_order_ids.append(order.id)
+
+        products = (
+            await self.session.scalars(
+                select(Product)
+                .where(Product.inventory_mode == InventoryMode.TRACKED.value)
+                .order_by(Product.name.asc(), Product.id.asc())
             )
-        return [
-            ProcurementRequirementResponse(
-                product_id=product_id,
-                product_name=product_name,
-                shortage_quantity=shortage_quantity,
-                affected_order_count=len(order_ids),
-                order_ids=order_ids,
+        ).all()
+        requirements: list[ProcurementRequirementResponse] = []
+        for product in products:
+            demand = demand_by_product.get(product.id, _ProcurementDemand())
+            projection = _project_procurement(
+                current_stock=product.stock_quantity,
+                low_stock_threshold=product.low_stock_threshold,
+                confirmed_shortage=demand.confirmed_shortage,
+                pending_quantity=demand.pending_quantity,
             )
-            for product_id, (product_name, shortage_quantity, order_ids) in requirements.items()
-        ]
+            should_replenish = (
+                product.publication_status != PublicationStatus.ARCHIVED.value
+                and projection.projected_stock <= product.low_stock_threshold
+            )
+            if projection.order_shortage <= ZERO and not should_replenish:
+                continue
+
+            order_ids = list(demand.confirmed_order_ids)
+            order_ids.extend(
+                order_id for order_id in demand.pending_order_ids if order_id not in order_ids
+            )
+            requirements.append(
+                ProcurementRequirementResponse(
+                    product_id=product.id,
+                    product_name=product.name,
+                    unit_label=product.unit_label,
+                    current_stock_quantity=product.stock_quantity,
+                    projected_stock_quantity=projection.projected_stock,
+                    pending_order_quantity=demand.pending_quantity,
+                    shortage_quantity=projection.order_shortage,
+                    low_stock_replenishment_quantity=projection.low_stock_replenishment,
+                    suggested_purchase_quantity=projection.suggested_purchase,
+                    low_stock_threshold=product.low_stock_threshold,
+                    affected_order_count=len(order_ids),
+                    pending_order_count=len(demand.pending_order_ids),
+                    procurement_in_progress=demand.procurement_in_progress,
+                    order_ids=order_ids,
+                )
+            )
+        return requirements
 
     @staticmethod
     def _purchase_response(

@@ -139,11 +139,16 @@ class Product(TimestampMixin, Base):
     )
 
     @property
+    def effective_stock_policy(self) -> str:
+        """Use arrange-on-demand for products created before policy selection existed."""
+        return self.stock_policy or StockPolicy.ARRANGE_ON_DEMAND.value
+
+    @property
     def available(self) -> bool:
         if self.publication_status != PublicationStatus.ACTIVE.value:
             return False
         if self.inventory_mode == InventoryMode.TRACKED.value:
-            return self.stock_quantity > 0 or self.stock_policy in {
+            return self.stock_quantity > 0 or self.effective_stock_policy in {
                 StockPolicy.ARRANGE_ON_DEMAND.value,
                 StockPolicy.PREORDER.value,
             }
@@ -157,7 +162,7 @@ class Product(TimestampMixin, Base):
         if (
             self.inventory_mode == InventoryMode.TRACKED.value
             and self.stock_quantity <= 0
-            and self.stock_policy
+            and self.effective_stock_policy
             in {
                 StockPolicy.ARRANGE_ON_DEMAND.value,
                 StockPolicy.PREORDER.value,

@@ -108,7 +108,7 @@ class OrderTransitionService:
                 result = await reservations.reserve_stock_in_transaction(
                     product_id=item.product_id, quantity=item.quantity, order_id=order.id
                 )
-                policy = product.stock_policy or StockPolicy.IN_STOCK_ONLY.value
+                policy = product.effective_stock_policy
                 if result.shortage_quantity > 0 and policy == StockPolicy.IN_STOCK_ONLY.value:
                     raise DomainError(
                         409, "insufficient_stock", f"Insufficient stock for {item.product_id}"

@@ -46,9 +46,24 @@ def test_untracked_product_uses_manual_availability() -> None:
     assert make_product(manual_available=False).available is False
 
 
-def test_tracked_product_uses_stock() -> None:
+def test_tracked_product_with_explicit_in_stock_policy_uses_stock() -> None:
     assert make_product(inventory_mode="tracked", stock_quantity=Decimal("0.001")).available
-    assert not make_product(inventory_mode="tracked", stock_quantity=Decimal("0")).available
+    assert not make_product(
+        inventory_mode="tracked",
+        stock_quantity=Decimal("0"),
+        stock_policy=StockPolicy.IN_STOCK_ONLY.value,
+    ).available
+
+
+def test_unset_stock_policy_defaults_to_arrange_on_demand() -> None:
+    product = make_product(
+        inventory_mode=InventoryMode.TRACKED.value,
+        stock_quantity=Decimal("0"),
+    )
+    assert product.effective_stock_policy == StockPolicy.ARRANGE_ON_DEMAND.value
+    assert product.available is True
+    assert product.customer_availability == "available_on_demand"
+    assert requires_current_stock(product) is False
 
 
 def test_arrange_on_demand_is_customer_orderable_without_tracked_stock() -> None:

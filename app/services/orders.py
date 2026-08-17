@@ -64,8 +64,7 @@ def requires_current_stock(product: Product) -> bool:
     """Return whether checkout must reject quantities above currently free stock."""
     return (
         product.inventory_mode == InventoryMode.TRACKED.value
-        and (product.stock_policy or StockPolicy.IN_STOCK_ONLY.value)
-        == StockPolicy.IN_STOCK_ONLY.value
+        and product.effective_stock_policy == StockPolicy.IN_STOCK_ONLY.value
     )
 
 

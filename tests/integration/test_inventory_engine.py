@@ -506,6 +506,15 @@ async def test_order_transition_reserves_delivers_and_is_idempotent() -> None:
         product_row = await session.get(Product, "mango")
         assert product_row is not None
         product_row.stock_quantity = Decimal("5")
+        session.add(
+            InventoryBatch(
+                product_id="mango",
+                received_quantity=Decimal("5"),
+                remaining_quantity=Decimal("5"),
+                unit_cost=Decimal("0"),
+                effective_cost=Decimal("0"),
+            )
+        )
         await session.commit()
 
         transitions = OrderTransitionService(session)
@@ -1099,7 +1108,7 @@ async def test_customer_aggregates_use_realized_orders_and_recent_favourites() -
 
 
 @pytest.mark.asyncio
-async def test_public_checkout_handles_arrange_on_demand_and_ignores_tampered_prices() -> None:
+async def test_public_checkout_projects_default_on_demand_shortage_into_procurement() -> None:
     assert TEST_DATABASE_URL is not None
     await reset_database()
     await asyncio.to_thread(run_migrations)
@@ -1107,11 +1116,12 @@ async def test_public_checkout_handles_arrange_on_demand_and_ignores_tampered_pr
     factory = async_sessionmaker(engine, expire_on_commit=False)
     async with factory() as session:
         catalog_product = product("mango")
-        # A tracked zero-stock product must remain customer-orderable when operations
-        # has explicitly selected arrange-on-demand.
+        # Admin-created tracked products use arrange-on-demand unless operations
+        # explicitly selects the restrictive in-stock-only policy.
         catalog_product.inventory_mode = "tracked"
-        catalog_product.stock_quantity = Decimal("0")
-        catalog_product.stock_policy = "arrange_on_demand"
+        catalog_product.stock_quantity = Decimal("3")
+        catalog_product.low_stock_threshold = Decimal("5")
+        catalog_product.stock_policy = None
         catalog_product.base_price_pkr = 500
         zone = DeliveryZone(
             name="Checkout Zone",
@@ -1151,7 +1161,7 @@ async def test_public_checkout_handles_arrange_on_demand_and_ignores_tampered_pr
                         "items": [
                             {
                                 "product_id": "mango",
-                                "quantity": "1",
+                                "quantity": "5",
                                 "unit_price_pkr": 1,
                                 "line_total_pkr": 1,
                             }
@@ -1161,8 +1171,8 @@ async def test_public_checkout_handles_arrange_on_demand_and_ignores_tampered_pr
                 )
                 assert response.status_code == 201
                 body = response.json()
-                assert body["subtotal_pkr"] == 500
-                assert body["total_pkr"] == 500
+                assert body["subtotal_pkr"] == 2500
+                assert body["total_pkr"] == 2500
                 assert body["total_pkr"] != 1
                 assert body["customer"]["name"] == "Ayesha"
                 assert body["customer"]["address"] == "Johar Town"
@@ -1170,6 +1180,18 @@ async def test_public_checkout_handles_arrange_on_demand_and_ignores_tampered_pr
                 assert saved_order is not None
                 assert saved_order.delivery_zone_id == zone.id
                 assert not {"cogs_pkr", "internal_fulfillment_status"}.intersection(body)
+
+                requirements = await InventoryReadService(session).procurement_requirements()
+                assert len(requirements) == 1
+                requirement = requirements[0]
+                assert requirement.product_id == "mango"
+                assert requirement.current_stock_quantity == Decimal("3")
+                assert requirement.pending_order_quantity == Decimal("5")
+                assert requirement.shortage_quantity == Decimal("2")
+                assert requirement.low_stock_replenishment_quantity == Decimal("5")
+                assert requirement.suggested_purchase_quantity == Decimal("7")
+                assert requirement.pending_order_count == 1
+                assert requirement.order_ids == [saved_order.id]
         finally:
             app.dependency_overrides.clear()
     await engine.dispose()

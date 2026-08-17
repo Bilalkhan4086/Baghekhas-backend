@@ -5,7 +5,7 @@ import pytest
 from app.enums import PurchaseCostAllocationMethod
 from app.exceptions import DomainError
 from app.models import Purchase, PurchaseItem
-from app.services.inventory import PurchaseService
+from app.services.inventory import PurchaseService, _project_procurement
 
 
 def purchase(method: PurchaseCostAllocationMethod, overhead: str) -> Purchase:
@@ -67,3 +67,45 @@ def test_purchase_overhead_allocation_by_value_and_manual_validation() -> None:
             purchase(PurchaseCostAllocationMethod.MANUAL, "60"),
             manual_items,
         )
+
+
+def test_procurement_projection_covers_order_shortage_and_low_stock_buffer() -> None:
+    projection = _project_procurement(
+        current_stock=Decimal("3"),
+        low_stock_threshold=Decimal("5"),
+        confirmed_shortage=Decimal("0"),
+        pending_quantity=Decimal("5"),
+    )
+
+    assert projection.projected_stock == Decimal("0")
+    assert projection.order_shortage == Decimal("2")
+    assert projection.low_stock_replenishment == Decimal("5")
+    assert projection.suggested_purchase == Decimal("7")
+
+
+def test_procurement_projection_replenishes_stock_consumed_by_pending_orders() -> None:
+    projection = _project_procurement(
+        current_stock=Decimal("7"),
+        low_stock_threshold=Decimal("5"),
+        confirmed_shortage=Decimal("0"),
+        pending_quantity=Decimal("3"),
+    )
+
+    assert projection.projected_stock == Decimal("4")
+    assert projection.order_shortage == Decimal("0")
+    assert projection.low_stock_replenishment == Decimal("1")
+    assert projection.suggested_purchase == Decimal("1")
+
+
+def test_procurement_projection_uses_new_stock_before_recommending_another_purchase() -> None:
+    projection = _project_procurement(
+        current_stock=Decimal("7"),
+        low_stock_threshold=Decimal("5"),
+        confirmed_shortage=Decimal("2"),
+        pending_quantity=Decimal("0"),
+    )
+
+    assert projection.projected_stock == Decimal("5")
+    assert projection.order_shortage == Decimal("0")
+    assert projection.low_stock_replenishment == Decimal("0")
+    assert projection.suggested_purchase == Decimal("0")
