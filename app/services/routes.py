@@ -603,6 +603,10 @@ class DeliveryRouteService:
                 stop.not_received_reason = reason.value
                 stop.outcome_note = note
             stop.completed_at = datetime.now(UTC)
+            # The database permits only one ready/in-progress stop per route. Flush the
+            # completed current stop before promoting the next one so PostgreSQL never
+            # observes both rows as current during the same transaction.
+            await self.session.flush([stop])
             next_stop = await self.session.scalar(
                 select(RouteStop)
                 .where(

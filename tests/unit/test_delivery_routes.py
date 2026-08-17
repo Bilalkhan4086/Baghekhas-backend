@@ -2,15 +2,18 @@ import uuid
 from datetime import date
 from decimal import Decimal
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from pydantic import ValidationError
 
+from app.enums import DeliveryRouteStatus, RouteStopStatus
 from app.main import app
 from app.models import Order
 from app.schemas.routes import RouteGenerateRequest, RouteNotReceivedRequest
 from app.services.order_transitions import OrderTransitionService
 from app.services.route_optimization import GoogleRouteOptimizer, OptimizationStop
+from app.services.routes import DeliveryRouteService
 
 
 def test_route_generation_requires_one_start_source() -> None:
@@ -102,3 +105,69 @@ def test_route_openapi_requires_idempotency_headers() -> None:
             if parameter["in"] == "header"
         }
         assert headers["Idempotency-Key"]["required"] is True
+
+
+@pytest.mark.asyncio
+async def test_completing_stop_flushes_it_before_promoting_next(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    route_id = uuid.uuid4()
+    stop_id = uuid.uuid4()
+    rider_id = uuid.uuid4()
+    order_id = uuid.uuid4()
+    route = SimpleNamespace(
+        id=route_id,
+        rider_id=rider_id,
+        status=DeliveryRouteStatus.IN_PROGRESS.value,
+    )
+    stop = SimpleNamespace(
+        id=stop_id,
+        order_id=order_id,
+        status=RouteStopStatus.IN_PROGRESS.value,
+        completed_at=None,
+    )
+    next_stop = SimpleNamespace(status=RouteStopStatus.PENDING.value)
+
+    class TransactionContext:
+        async def __aenter__(self) -> None:
+            return None
+
+        async def __aexit__(
+            self,
+            _error_type: type[BaseException] | None,
+            _error: BaseException | None,
+            _traceback: object,
+        ) -> None:
+            return None
+
+    session = MagicMock()
+    session.get = AsyncMock(return_value=None)
+    session.in_transaction.return_value = False
+    session.begin.return_value = TransactionContext()
+    session.scalar = AsyncMock(return_value=next_stop)
+
+    async def assert_current_stop_released(rows: list[object]) -> None:
+        assert rows == [stop]
+        assert stop.status == RouteStopStatus.DELIVERED.value
+        assert next_stop.status == RouteStopStatus.PENDING.value
+
+    session.flush = AsyncMock(side_effect=assert_current_stop_released)
+    service = DeliveryRouteService(session, MagicMock())
+    service._lock_route_stop = AsyncMock(return_value=(route, stop))  # type: ignore[method-assign]
+    service._load_route = AsyncMock(return_value=route)  # type: ignore[method-assign]
+    monkeypatch.setattr(
+        "app.services.routes.OrderTransitionService.deliver_order_in_transaction",
+        AsyncMock(),
+    )
+    monkeypatch.setattr("app.services.routes.rider_route_response", lambda value: value)
+
+    await service.complete_stop(
+        route_id=route_id,
+        stop_id=stop_id,
+        rider_id=rider_id,
+        idempotency_key=uuid.uuid4(),
+        delivered=True,
+    )
+
+    session.flush.assert_awaited_once_with([stop])
+    assert next_stop.status == RouteStopStatus.READY.value
