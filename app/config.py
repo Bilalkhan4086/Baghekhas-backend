@@ -4,6 +4,8 @@ from functools import lru_cache
 from pydantic import AliasChoices, Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+LOCAL_STOREFRONT_ORIGIN = "http://localhost:3000"
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
@@ -34,6 +36,26 @@ class Settings(BaseSettings):
         ge=5,
         le=720,
         validation_alias="RIDER_JWT_ACCESS_TOKEN_MINUTES",
+    )
+    rider_refresh_token_days: int = Field(
+        default=7,
+        ge=1,
+        le=90,
+        validation_alias="RIDER_REFRESH_TOKEN_DAYS",
+    )
+    rider_route_workflow_enabled: bool = Field(
+        default=False,
+        validation_alias="RIDER_ROUTE_WORKFLOW_ENABLED",
+    )
+    google_cloud_project_id: str | None = Field(
+        default=None,
+        validation_alias="GOOGLE_CLOUD_PROJECT_ID",
+    )
+    route_optimization_timeout_seconds: int = Field(
+        default=10,
+        ge=2,
+        le=60,
+        validation_alias="ROUTE_OPTIMIZATION_TIMEOUT_SECONDS",
     )
     jwt_algorithm: str = "HS256"
     jwt_issuer: str = "bagh-e-khas-api"
@@ -104,7 +126,12 @@ class Settings(BaseSettings):
 
     @property
     def cors_origins(self) -> list[str]:
-        return [origin.strip() for origin in self.cors_allowed_origins.split(",") if origin.strip()]
+        configured_origins = [
+            origin.strip() for origin in self.cors_allowed_origins.split(",") if origin.strip()
+        ]
+        if self.environment.casefold() != "development":
+            return configured_origins
+        return list(dict.fromkeys([*configured_origins, LOCAL_STOREFRONT_ORIGIN]))
 
     @property
     def delivery_cutoff(self) -> time:

@@ -57,7 +57,9 @@ class OrderTransitionService:
         )
 
     @staticmethod
-    def available_actions(order: Order) -> list[str]:
+    def available_actions(
+        order: Order, *, route_workflow_enabled: bool = False
+    ) -> list[str]:
         """Return actions enabled by the same state checks used by transition methods."""
         actions: list[str] = []
         if order.status == OrderStatus.PENDING.value:
@@ -74,7 +76,9 @@ class OrderTransitionService:
             ):
                 actions.append("mark_procured")
         elif order.status == OrderStatus.PACKING.value:
-            actions.extend(["dispatch", "cancel"])
+            if not route_workflow_enabled:
+                actions.append("dispatch")
+            actions.append("cancel")
         elif order.status == OrderStatus.DISPATCHED.value:
             actions.extend(["deliver", "not_received"])
         return actions
@@ -278,6 +282,64 @@ class OrderTransitionService:
                 self._history(order, order.status, "Rider started delivery", None)
         return order
 
+    async def dispatch_for_rider_in_transaction(
+        self, order_id: uuid.UUID, rider_id: uuid.UUID
+    ) -> Order:
+        """Dispatch one route-managed current stop inside the caller's transaction."""
+        order = await self._locked_order(order_id)
+        if order.rider_id != rider_id:
+            raise DomainError(403, "order_not_assigned", "This order is not assigned to you")
+        if (
+            order.status != OrderStatus.PACKING.value
+            or order.internal_fulfillment_status != FulfillmentStatus.READY_FOR_DISPATCH.value
+        ):
+            raise DomainError(
+                409, "invalid_status_transition", "Order is not ready for rider dispatch"
+            )
+        old = order.status
+        order.status = OrderStatus.DISPATCHED.value
+        order.rider_started_at = datetime.now(UTC)
+        self._history(order, old, "Rider started route delivery", None)
+        return order
+
+    async def deliver_order_in_transaction(
+        self,
+        order_id: uuid.UUID,
+        actor_id: uuid.UUID | None,
+        *,
+        assigned_rider_id: uuid.UUID | None = None,
+    ) -> Order:
+        order = await self._locked_order(order_id)
+        if assigned_rider_id is not None and order.rider_id != assigned_rider_id:
+            raise DomainError(403, "order_not_assigned", "This order is not assigned to you")
+        if assigned_rider_id is not None and order.status == OrderStatus.DELIVERED.value:
+            return order
+        if order.status != OrderStatus.DISPATCHED.value:
+            raise DomainError(
+                409, "invalid_status_transition", "Only dispatched orders can be delivered"
+            )
+        reservations = list(
+            (
+                await self.session.scalars(
+                    select(InventoryReservation).where(
+                        InventoryReservation.order_id == order.id,
+                        InventoryReservation.status == InventoryReservationStatus.ACTIVE.value,
+                    )
+                )
+            ).all()
+        )
+        reservation_service = ReservationService(self.session)
+        total = Decimal("0")
+        for reservation in reservations:
+            total += await reservation_service.record_sale_in_transaction(
+                reservation.id
+            ) or Decimal("0")
+        order.cogs_pkr = int(total.quantize(Decimal("1"), ROUND_HALF_UP))
+        old = order.status
+        order.status = OrderStatus.DELIVERED.value
+        self._history(order, old, "Order delivered", actor_id)
+        return order
+
     async def deliver_order(
         self,
         order_id: uuid.UUID,
@@ -287,35 +349,11 @@ class OrderTransitionService:
     ) -> Order:
         """Atomically consume active reservations, persist FIFO COGS, and deliver an order."""
         async with self.session.begin():
-            order = await self._locked_order(order_id)
-            if assigned_rider_id is not None and order.rider_id != assigned_rider_id:
-                raise DomainError(403, "order_not_assigned", "This order is not assigned to you")
-            if assigned_rider_id is not None and order.status == OrderStatus.DELIVERED.value:
-                return order
-            if order.status != OrderStatus.DISPATCHED.value:
-                raise DomainError(
-                    409, "invalid_status_transition", "Only dispatched orders can be delivered"
-                )
-            reservations = list(
-                (
-                    await self.session.scalars(
-                        select(InventoryReservation).where(
-                            InventoryReservation.order_id == order.id,
-                            InventoryReservation.status == InventoryReservationStatus.ACTIVE.value,
-                        )
-                    )
-                ).all()
+            order = await self.deliver_order_in_transaction(
+                order_id,
+                actor_id,
+                assigned_rider_id=assigned_rider_id,
             )
-            reservation_service = ReservationService(self.session)
-            total = Decimal("0")
-            for reservation in reservations:
-                total += await reservation_service.record_sale_in_transaction(
-                    reservation.id
-                ) or Decimal("0")
-            order.cogs_pkr = int(total.quantize(Decimal("1"), ROUND_HALF_UP))
-            old = order.status
-            order.status = OrderStatus.DELIVERED.value
-            self._history(order, old, "Order delivered", actor_id)
         return order
 
     async def cancel_order(self, order_id: uuid.UUID, admin_id: uuid.UUID, reason: str) -> Order:
@@ -362,18 +400,36 @@ class OrderTransitionService:
         if not notes.strip():
             raise DomainError(422, "not_received_notes_required", "Resolution notes are required")
         async with self.session.begin():
-            order = await self._locked_order(order_id)
-            if assigned_rider_id is not None and order.rider_id != assigned_rider_id:
-                raise DomainError(403, "order_not_assigned", "This order is not assigned to you")
-            if assigned_rider_id is not None and order.status == OrderStatus.NOT_RECEIVED.value:
-                return order
-            if order.status != OrderStatus.DISPATCHED.value:
-                raise DomainError(
-                    409,
-                    "invalid_status_transition",
-                    "Only dispatched orders can be marked not received",
-                )
-            old = order.status
-            order.status = OrderStatus.NOT_RECEIVED.value
-            self._history(order, old, notes.strip(), admin_id)
+            order = await self.mark_not_received_in_transaction(
+                order_id,
+                admin_id,
+                notes,
+                assigned_rider_id=assigned_rider_id,
+            )
+        return order
+
+    async def mark_not_received_in_transaction(
+        self,
+        order_id: uuid.UUID,
+        admin_id: uuid.UUID | None,
+        notes: str,
+        *,
+        assigned_rider_id: uuid.UUID | None = None,
+    ) -> Order:
+        if not notes.strip():
+            raise DomainError(422, "not_received_notes_required", "Resolution notes are required")
+        order = await self._locked_order(order_id)
+        if assigned_rider_id is not None and order.rider_id != assigned_rider_id:
+            raise DomainError(403, "order_not_assigned", "This order is not assigned to you")
+        if assigned_rider_id is not None and order.status == OrderStatus.NOT_RECEIVED.value:
+            return order
+        if order.status != OrderStatus.DISPATCHED.value:
+            raise DomainError(
+                409,
+                "invalid_status_transition",
+                "Only dispatched orders can be marked not received",
+            )
+        old = order.status
+        order.status = OrderStatus.NOT_RECEIVED.value
+        self._history(order, old, notes.strip(), admin_id)
         return order

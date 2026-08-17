@@ -312,6 +312,7 @@ class Order(TimestampMixin, Base):
     fulfillment_lines: Mapped[list[OrderFulfillmentLine]] = relationship(
         back_populates="order", cascade="all, delete-orphan", lazy="raise"
     )
+    route_stops: Mapped[list[RouteStop]] = relationship(back_populates="order", lazy="raise")
 
     @property
     def delivery_customer(self) -> dict[str, str]:
@@ -715,6 +716,12 @@ class Rider(Base):
         cascade="all, delete-orphan",
         lazy="raise",
     )
+    delivery_routes: Mapped[list[DeliveryRoute]] = relationship(
+        back_populates="rider", lazy="raise"
+    )
+    refresh_sessions: Mapped[list[RiderRefreshSession]] = relationship(
+        back_populates="rider", cascade="all, delete-orphan", lazy="raise"
+    )
 
 
 class RiderZone(Base):
@@ -734,6 +741,174 @@ class RiderZone(Base):
 
     rider: Mapped[Rider] = relationship(back_populates="rider_zones", lazy="raise")
     zone: Mapped[DeliveryZone] = relationship(back_populates="rider_zones", lazy="raise")
+
+
+class DeliveryRoute(TimestampMixin, Base):
+    __tablename__ = "delivery_routes"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('generated', 'in_progress', 'completed', 'cancelled')",
+            name="delivery_routes_status_valid",
+        ),
+        CheckConstraint(
+            "start_latitude BETWEEN -90 AND 90",
+            name="delivery_routes_start_latitude_valid",
+        ),
+        CheckConstraint(
+            "start_longitude BETWEEN -180 AND 180",
+            name="delivery_routes_start_longitude_valid",
+        ),
+        CheckConstraint(
+            "start_source IN ('gps', 'depot')",
+            name="delivery_routes_start_source_valid",
+        ),
+        CheckConstraint(
+            "total_distance_meters >= 0",
+            name="delivery_routes_distance_nonnegative",
+        ),
+        CheckConstraint(
+            "estimated_duration_seconds >= 0",
+            name="delivery_routes_duration_nonnegative",
+        ),
+        Index(
+            "delivery_routes_rider_date_active_uidx",
+            "rider_id",
+            "delivery_date",
+            unique=True,
+            postgresql_where=text("status IN ('generated', 'in_progress')"),
+        ),
+        Index("delivery_routes_date_status_idx", "delivery_date", "status"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    rider_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("riders.id", ondelete="RESTRICT"), nullable=False
+    )
+    delivery_date: Mapped[date] = mapped_column(nullable=False)
+    status: Mapped[str] = mapped_column(String(40), nullable=False)
+    start_latitude: Mapped[Decimal] = mapped_column(Numeric(9, 6), nullable=False)
+    start_longitude: Mapped[Decimal] = mapped_column(Numeric(10, 6), nullable=False)
+    start_source: Mapped[str] = mapped_column(String(20), nullable=False)
+    total_distance_meters: Mapped[int] = mapped_column(Integer, nullable=False)
+    estimated_duration_seconds: Mapped[int] = mapped_column(Integer, nullable=False)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    cancelled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    rider: Mapped[Rider] = relationship(back_populates="delivery_routes", lazy="raise")
+    stops: Mapped[list[RouteStop]] = relationship(
+        back_populates="route",
+        cascade="all, delete-orphan",
+        order_by="RouteStop.sequence",
+        lazy="raise",
+    )
+
+
+class RouteStop(TimestampMixin, Base):
+    __tablename__ = "route_stops"
+    __table_args__ = (
+        CheckConstraint("sequence > 0", name="route_stops_sequence_positive"),
+        CheckConstraint(
+            "status IN ('pending', 'ready', 'in_progress', 'delivered', "
+            "'not_received', 'cancelled')",
+            name="route_stops_status_valid",
+        ),
+        CheckConstraint(
+            "distance_from_previous_meters >= 0",
+            name="route_stops_distance_nonnegative",
+        ),
+        CheckConstraint(
+            "estimated_duration_seconds >= 0",
+            name="route_stops_duration_nonnegative",
+        ),
+        CheckConstraint(
+            "not_received_reason IS NULL OR not_received_reason IN "
+            "('customer_unavailable', 'customer_refused', 'wrong_address', "
+            "'phone_unreachable', 'requested_later', 'other')",
+            name="route_stops_not_received_reason_valid",
+        ),
+        CheckConstraint(
+            "not_received_reason <> 'other' OR "
+            "(outcome_note IS NOT NULL AND length(trim(outcome_note)) > 0)",
+            name="route_stops_other_note_required",
+        ),
+        UniqueConstraint("route_id", "sequence", name="route_stops_route_sequence_key"),
+        UniqueConstraint("route_id", "order_id", name="route_stops_route_order_key"),
+        Index(
+            "route_stops_route_current_uidx",
+            "route_id",
+            unique=True,
+            postgresql_where=text("status IN ('ready', 'in_progress')"),
+        ),
+        Index(
+            "route_stops_order_unresolved_uidx",
+            "order_id",
+            unique=True,
+            postgresql_where=text("status IN ('pending', 'ready', 'in_progress')"),
+        ),
+        Index("route_stops_route_status_sequence_idx", "route_id", "status", "sequence"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    route_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("delivery_routes.id", ondelete="CASCADE"), nullable=False
+    )
+    order_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("orders.id", ondelete="RESTRICT"), nullable=False
+    )
+    sequence: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(String(40), nullable=False)
+    distance_from_previous_meters: Mapped[int] = mapped_column(Integer, nullable=False)
+    estimated_duration_seconds: Mapped[int] = mapped_column(Integer, nullable=False)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    not_received_reason: Mapped[str | None] = mapped_column(String(40))
+    outcome_note: Mapped[str | None] = mapped_column(String(500))
+
+    route: Mapped[DeliveryRoute] = relationship(back_populates="stops", lazy="raise")
+    order: Mapped[Order] = relationship(back_populates="route_stops", lazy="raise")
+
+
+class RiderRefreshSession(Base):
+    __tablename__ = "rider_refresh_sessions"
+    __table_args__ = (
+        Index("rider_refresh_sessions_rider_expires_idx", "rider_id", "expires_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    rider_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("riders.id", ondelete="CASCADE"), nullable=False
+    )
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
+    auth_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    rider: Mapped[Rider] = relationship(back_populates="refresh_sessions", lazy="raise")
+
+
+class RiderActionReceipt(Base):
+    __tablename__ = "rider_action_receipts"
+    __table_args__ = (Index("rider_action_receipts_route_created_idx", "route_id", "created_at"),)
+
+    idempotency_key: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    request_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    rider_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("riders.id", ondelete="RESTRICT"), nullable=False
+    )
+    route_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("delivery_routes.id", ondelete="RESTRICT"), nullable=False
+    )
+    stop_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("route_stops.id", ondelete="RESTRICT")
+    )
+    action: Mapped[str] = mapped_column(String(40), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
 
 
 class OrderStatusHistory(Base):

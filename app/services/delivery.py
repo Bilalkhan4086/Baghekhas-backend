@@ -12,8 +12,9 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.enums import RouteStopStatus
 from app.exceptions import DomainError, not_found
-from app.models import DeliveryZone, Order, OrderStatusHistory, Rider, RiderZone
+from app.models import DeliveryZone, Order, OrderStatusHistory, Rider, RiderZone, RouteStop
 from app.security import password_hash
 
 KARACHI = ZoneInfo("Asia/Karachi")
@@ -385,6 +386,26 @@ class RiderAssignmentService:
             }:
                 raise DomainError(
                     409, "invalid_rider_assignment", "Rider assignment is not allowed"
+                )
+            routed_stop_id = await self.session.scalar(
+                select(RouteStop.id)
+                .where(
+                    RouteStop.order_id == order.id,
+                    RouteStop.status.in_(
+                        [
+                            RouteStopStatus.PENDING.value,
+                            RouteStopStatus.READY.value,
+                            RouteStopStatus.IN_PROGRESS.value,
+                        ]
+                    ),
+                )
+                .limit(1)
+            )
+            if routed_stop_id is not None:
+                raise DomainError(
+                    409,
+                    "routed_order_locked",
+                    "Cancel the generated route before changing this rider assignment",
                 )
             rider = await self.require_active_rider(new_rider_id)
             previous_rider_id = order.rider_id

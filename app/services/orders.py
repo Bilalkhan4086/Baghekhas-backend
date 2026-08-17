@@ -15,7 +15,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 from sqlalchemy.sql import Select
 
-from app.enums import ORDER_TRANSITIONS, FulfillmentStatus, InventoryMode, OrderStatus, StockPolicy
+from app.enums import (
+    ORDER_TRANSITIONS,
+    FulfillmentStatus,
+    InventoryMode,
+    OrderStatus,
+    RouteStopStatus,
+    StockPolicy,
+)
 from app.exceptions import DomainError, not_found
 from app.models import (
     AdminUser,
@@ -25,6 +32,7 @@ from app.models import (
     OrderItem,
     OrderStatusHistory,
     Product,
+    RouteStop,
 )
 from app.schemas.common import Page
 from app.schemas.orders import OrderAdminUpdate, OrderCreate, OrderSummaryResponse
@@ -421,6 +429,26 @@ async def update_order(
         "promised_delivery_time",
     }.intersection(payload.model_fields_set)
     if schedule_fields:
+        routed_stop_id = await session.scalar(
+            select(RouteStop.id)
+            .where(
+                RouteStop.order_id == order.id,
+                RouteStop.status.in_(
+                    [
+                        RouteStopStatus.PENDING.value,
+                        RouteStopStatus.READY.value,
+                        RouteStopStatus.IN_PROGRESS.value,
+                    ]
+                ),
+            )
+            .limit(1)
+        )
+        if routed_stop_id is not None:
+            raise DomainError(
+                409,
+                "routed_order_locked",
+                "Cancel the generated route before changing this delivery schedule",
+            )
         if order.status in {
             OrderStatus.DELIVERED.value,
             OrderStatus.NOT_RECEIVED.value,

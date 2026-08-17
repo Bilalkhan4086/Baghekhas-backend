@@ -32,9 +32,15 @@ class RiderIdentityResponse(APIModel):
 
 class RiderTokenResponse(APIModel):
     access_token: str
+    refresh_token: str
     token_type: str = "bearer"
     expires_in: int
+    refresh_expires_in: int
     rider: RiderIdentityResponse
+
+
+class RiderRefreshRequest(APIModel):
+    refresh_token: str = Field(min_length=43, max_length=500)
 
 
 class RiderNotReceivedRequest(APIModel):

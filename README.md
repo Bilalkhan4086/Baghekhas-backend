@@ -50,11 +50,28 @@ integers or dropping audit history could destroy data. Use a Neon branch restore
 - Authentication: `POST /api/v1/auth/login` and `GET /api/v1/auth/me`
 - Admin products/inventory: `/api/v1/admin/products`
 - Admin orders: `/api/v1/admin/orders`
+- Rider authentication, summary, history, and ordered route execution: `/api/v1/rider`
+- Admin route monitoring and generated-route cancellation: `/api/v1/admin/delivery-routes`
 
 Order creation validates authoritative prices and availability without changing inventory.
 Confirmation reserves free FIFO stock, cancellation releases active reservations, and delivery
 consumes the reservation into COGS. Purchases, waste, and corrections remain explicit audited
 inventory operations.
+
+## Rider route rollout
+
+Apply migration `0018_delivery_routes`, configure Google Application Default Credentials for
+the server process, and set `GOOGLE_CLOUD_PROJECT_ID`. Keep
+`RIDER_ROUTE_WORKFLOW_ENABLED=false` while the Backend, RiderApp, and Admin Panel compatibility
+release is deployed. Enabling it makes route generation select the authenticated rider's assigned
+`packing + ready_for_dispatch` orders for today and removes direct Admin dispatch from the
+available-action response. Starting the route does not dispatch an order; starting the current
+stop performs the authoritative dispatch transition.
+
+Rider access tokens use a separate audience and rotating, hashed refresh sessions. Rider route
+mutations require a UUID `Idempotency-Key`. The server never sends future stops' full addresses or
+phone numbers after a route starts, and rider history excludes prices, totals, procurement state,
+admin notes, and historical phone details.
 
 ## Tests and checks
 

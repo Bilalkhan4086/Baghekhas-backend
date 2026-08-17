@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Response, status
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
@@ -20,11 +20,17 @@ from app.schemas.rider import (
     RiderLoginRequest,
     RiderNotReceivedRequest,
     RiderOrderItemResponse,
+    RiderRefreshRequest,
     RiderTokenResponse,
 )
-from app.security import create_rider_access_token, verify_password
+from app.security import verify_password
 from app.services.delivery import KARACHI
 from app.services.order_transitions import OrderTransitionService
+from app.services.rider_auth import (
+    issue_rider_token_pair,
+    revoke_rider_refresh_token,
+    rotate_rider_refresh_token,
+)
 
 router = APIRouter(prefix="/rider", tags=["rider"])
 
@@ -96,17 +102,34 @@ async def login(
         raise DomainError(401, "invalid_credentials", "Phone or password is incorrect")
     if not rider.is_active:
         raise DomainError(403, "rider_inactive", "Rider account is inactive")
-    access_token, expires_in = create_rider_access_token(
-        rider.id, rider.auth_version, settings
-    )
-    return RiderTokenResponse(
-        access_token=access_token,
-        expires_in=expires_in,
-        rider=RiderIdentityResponse(id=rider.id, name=rider.name),
-    )
+    return await issue_rider_token_pair(session, rider, settings)
 
 
-@router.get("/me/deliveries/today", response_model=list[RiderDeliveryListResponse])
+@router.post("/auth/refresh", response_model=RiderTokenResponse)
+async def refresh(
+    payload: RiderRefreshRequest,
+    session: SessionDep,
+    settings: SettingsDep,
+) -> RiderTokenResponse:
+    return await rotate_rider_refresh_token(session, payload.refresh_token, settings)
+
+
+@router.post("/auth/logout", status_code=status.HTTP_204_NO_CONTENT)
+async def logout(payload: RiderRefreshRequest, session: SessionDep) -> Response:
+    await revoke_rider_refresh_token(session, payload.refresh_token)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.get("/me", response_model=RiderIdentityResponse)
+async def me(rider: CurrentRider) -> RiderIdentityResponse:
+    return RiderIdentityResponse(id=rider.id, name=rider.name)
+
+
+@router.get(
+    "/me/deliveries/today",
+    response_model=list[RiderDeliveryListResponse],
+    deprecated=True,
+)
 async def today_deliveries(
     session: SessionDep, rider: CurrentRider
 ) -> list[RiderDeliveryListResponse]:
@@ -128,14 +151,18 @@ async def today_deliveries(
     return [_list_response(order) for order in orders]
 
 
-@router.get("/orders/{order_id}", response_model=RiderDeliveryDetailResponse)
+@router.get(
+    "/orders/{order_id}", response_model=RiderDeliveryDetailResponse, deprecated=True
+)
 async def delivery_detail(
     order_id: uuid.UUID, session: SessionDep, rider: CurrentRider
 ) -> RiderDeliveryDetailResponse:
     return _detail_response(await _assigned_order(session, order_id, rider.id))
 
 
-@router.post("/orders/{order_id}/start", response_model=RiderDeliveryDetailResponse)
+@router.post(
+    "/orders/{order_id}/start", response_model=RiderDeliveryDetailResponse, deprecated=True
+)
 async def start_delivery(
     order_id: uuid.UUID, session: SessionDep, rider: CurrentRider
 ) -> RiderDeliveryDetailResponse:
@@ -145,7 +172,11 @@ async def start_delivery(
     return _detail_response(await _assigned_order(session, order_id, rider_id))
 
 
-@router.post("/orders/{order_id}/delivered", response_model=RiderDeliveryDetailResponse)
+@router.post(
+    "/orders/{order_id}/delivered",
+    response_model=RiderDeliveryDetailResponse,
+    deprecated=True,
+)
 async def mark_delivered(
     order_id: uuid.UUID, session: SessionDep, rider: CurrentRider
 ) -> RiderDeliveryDetailResponse:
@@ -157,7 +188,11 @@ async def mark_delivered(
     return _detail_response(await _assigned_order(session, order_id, rider_id))
 
 
-@router.post("/orders/{order_id}/not-received", response_model=RiderDeliveryDetailResponse)
+@router.post(
+    "/orders/{order_id}/not-received",
+    response_model=RiderDeliveryDetailResponse,
+    deprecated=True,
+)
 async def mark_not_received(
     order_id: uuid.UUID,
     payload: RiderNotReceivedRequest,

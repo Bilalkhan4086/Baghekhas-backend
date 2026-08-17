@@ -173,7 +173,9 @@ async def test_admin_reassignment_accepts_active_rider_outside_order_zone(
         total_pkr=0,
     )
     session = _SessionStub()
-    session.scalar = AsyncMock(return_value=pending_order)  # type: ignore[attr-defined]
+    session.scalar = AsyncMock(  # type: ignore[attr-defined]
+        side_effect=[pending_order, None]
+    )
     require_active = AsyncMock(return_value=selected_rider)
     require_eligible = AsyncMock()
     monkeypatch.setattr(RiderAssignmentService, "require_active_rider", require_active)

@@ -99,6 +99,31 @@ class OrderStatus(StrEnum):
     REFUNDED = "refunded"
 
 
+class DeliveryRouteStatus(StrEnum):
+    GENERATED = "generated"
+    IN_PROGRESS = "in_progress"
+    COMPLETED = "completed"
+    CANCELLED = "cancelled"
+
+
+class RouteStopStatus(StrEnum):
+    PENDING = "pending"
+    READY = "ready"
+    IN_PROGRESS = "in_progress"
+    DELIVERED = "delivered"
+    NOT_RECEIVED = "not_received"
+    CANCELLED = "cancelled"
+
+
+class NotReceivedReason(StrEnum):
+    CUSTOMER_UNAVAILABLE = "customer_unavailable"
+    CUSTOMER_REFUSED = "customer_refused"
+    WRONG_ADDRESS = "wrong_address"
+    PHONE_UNREACHABLE = "phone_unreachable"
+    REQUESTED_LATER = "requested_later"
+    OTHER = "other"
+
+
 class CustomerSegment(StrEnum):
     RECENT = "recent"
     INACTIVE = "inactive"

@@ -3,11 +3,12 @@ from datetime import UTC, datetime
 from typing import Annotated
 
 from fastapi import APIRouter, Header, Query, Request, Response, status
+from sqlalchemy import select
 
 from app.dependencies import CurrentAdmin, SessionDep, SettingsDep
-from app.enums import FulfillmentStatus, OrderStatus
+from app.enums import DeliveryRouteStatus, FulfillmentStatus, OrderStatus, RouteStopStatus
 from app.exceptions import DomainError
-from app.models import Order
+from app.models import DeliveryRoute, Order, RouteStop
 from app.schemas.common import Page
 from app.schemas.orders import (
     AdminOrderCreate,
@@ -24,6 +25,7 @@ from app.schemas.orders import (
     OrderSummaryResponse,
     RiderReassignmentRequest,
 )
+from app.schemas.routes import OrderRouteStateResponse
 from app.services.delivery import DeliveryScheduleService, RiderAssignmentService
 from app.services.order_transitions import OrderTransitionService
 from app.services.orders import (
@@ -127,6 +129,39 @@ async def get_order(order_id: uuid.UUID, session: SessionDep, _admin: CurrentAdm
     return await get_order_for_admin(session, order_id)
 
 
+@router.get("/{order_id}/route-state", response_model=OrderRouteStateResponse)
+async def get_order_route_state(
+    order_id: uuid.UUID, session: SessionDep, _admin: CurrentAdmin
+) -> OrderRouteStateResponse:
+    row = (
+        await session.execute(
+            select(DeliveryRoute.id, DeliveryRoute.status, RouteStop.status)
+            .join(RouteStop, RouteStop.route_id == DeliveryRoute.id)
+            .where(
+                RouteStop.order_id == order_id,
+                DeliveryRoute.status.in_(
+                    [
+                        DeliveryRouteStatus.GENERATED.value,
+                        DeliveryRouteStatus.IN_PROGRESS.value,
+                    ]
+                ),
+            )
+            .order_by(DeliveryRoute.created_at.desc())
+            .limit(1)
+        )
+    ).first()
+    if row is None:
+        return OrderRouteStateResponse(
+            route_id=None, route_status=None, stop_status=None, locked=False
+        )
+    return OrderRouteStateResponse(
+        route_id=row[0],
+        route_status=DeliveryRouteStatus(row[1]),
+        stop_status=RouteStopStatus(row[2]),
+        locked=True,
+    )
+
+
 @router.patch("/{order_id}", response_model=OrderResponse)
 async def edit_order(
     order_id: uuid.UUID,
@@ -156,10 +191,17 @@ async def _updated_order(session: SessionDep, order_id: uuid.UUID) -> Order:
 
 @router.get("/{order_id}/available-actions", response_model=OrderActionsResponse)
 async def get_available_actions(
-    order_id: uuid.UUID, session: SessionDep, _admin: CurrentAdmin
+    order_id: uuid.UUID,
+    session: SessionDep,
+    _admin: CurrentAdmin,
+    settings: SettingsDep,
 ) -> OrderActionsResponse:
     order = await get_order_for_admin(session, order_id)
-    return OrderActionsResponse(actions=OrderTransitionService.available_actions(order))
+    return OrderActionsResponse(
+        actions=OrderTransitionService.available_actions(
+            order, route_workflow_enabled=settings.rider_route_workflow_enabled
+        )
+    )
 
 
 @router.post("/{order_id}/confirm", response_model=OrderResponse)
@@ -178,10 +220,20 @@ async def start_packing(order_id: uuid.UUID, session: SessionDep, admin: Current
     return await _updated_order(session, order_id)
 
 
-@router.post("/{order_id}/dispatch", response_model=OrderResponse)
+@router.post("/{order_id}/dispatch", response_model=OrderResponse, deprecated=True)
 async def dispatch_order(
-    order_id: uuid.UUID, payload: DispatchRequest, session: SessionDep, admin: CurrentAdmin
+    order_id: uuid.UUID,
+    payload: DispatchRequest,
+    session: SessionDep,
+    admin: CurrentAdmin,
+    settings: SettingsDep,
 ) -> Order:
+    if settings.rider_route_workflow_enabled:
+        raise DomainError(
+            409,
+            "route_managed_dispatch",
+            "Dispatch starts from the rider's current route stop",
+        )
     admin_id = admin.id
     await _clear_read_transaction(session)
     await OrderTransitionService(session).dispatch_order(order_id, payload.rider_id, admin_id)
