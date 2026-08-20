@@ -3,9 +3,11 @@ from fastapi import APIRouter
 from app.routers import (
     admin_customers,
     admin_delivery,
+    admin_expenses,
     admin_inventory,
     admin_orders,
     admin_products,
+    admin_reporting,
     admin_routes,
     admin_uploads,
     auth,
@@ -24,6 +26,8 @@ api_router.include_router(rider_routes.router)
 api_router.include_router(admin_uploads.router)
 api_router.include_router(admin_products.router)
 api_router.include_router(admin_inventory.router)
+api_router.include_router(admin_expenses.router)
+api_router.include_router(admin_reporting.router)
 api_router.include_router(admin_delivery.router)
 api_router.include_router(admin_customers.router)
 api_router.include_router(admin_orders.router)

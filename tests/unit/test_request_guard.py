@@ -25,3 +25,23 @@ def test_sensitive_route_rate_limit_uses_stable_error() -> None:
     assert limited.status_code == 429
     assert limited.headers["Retry-After"] == "60"
     assert limited.json()["detail"]["code"] == "rate_limit_exceeded"
+
+
+def test_order_tracking_uses_public_order_rate_limit() -> None:
+    guarded = FastAPI()
+    guarded.add_middleware(
+        RequestGuardMiddleware,
+        max_body_bytes=1024,
+        login_requests_per_minute=10,
+        public_order_requests_per_minute=1,
+    )
+
+    @guarded.post("/api/v1/orders/track")
+    async def track() -> dict[str, bool]:
+        return {"ok": True}
+
+    with TestClient(guarded) as client:
+        assert client.post("/api/v1/orders/track").status_code == 200
+        limited = client.post("/api/v1/orders/track")
+
+    assert limited.status_code == 429

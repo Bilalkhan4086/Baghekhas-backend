@@ -7,7 +7,7 @@ import pytest
 
 from app.enums import ORDER_TRANSITIONS, OrderStatus
 from app.exceptions import DomainError
-from app.models import Order, Rider
+from app.models import ORDER_NUMBER_ALPHABET, Order, Rider, generate_order_number
 from app.schemas.orders import (
     AdminOrderCreate,
     CustomerInput,
@@ -15,6 +15,7 @@ from app.schemas.orders import (
     OrderAdminUpdate,
     OrderCreate,
     OrderItemInput,
+    OrderTrackingRequest,
 )
 from app.services.delivery import DeliveryScheduleService, RiderAssignmentService
 from app.services.orders import (
@@ -104,6 +105,19 @@ def test_rejects_invalid_phone() -> None:
     with pytest.raises(DomainError) as caught:
         normalize_pakistani_phone("12345")
     assert caught.value.code == "invalid_phone"
+
+
+def test_public_order_number_is_six_unambiguous_characters() -> None:
+    order_number = generate_order_number()
+
+    assert len(order_number) == 6
+    assert set(order_number) <= set(ORDER_NUMBER_ALPHABET)
+
+
+def test_tracking_request_normalizes_order_number() -> None:
+    payload = OrderTrackingRequest(order_number=" ab2cde ", phone="03001234567")
+
+    assert payload.order_number == "AB2CDE"
 
 
 @pytest.mark.parametrize(

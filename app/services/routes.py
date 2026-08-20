@@ -28,6 +28,7 @@ from app.schemas.rider import RiderOrderItemResponse
 from app.schemas.routes import (
     AdminRouteDetailResponse,
     AdminRoutePageResponse,
+    AdminRouteStopResponse,
     AdminRouteSummaryResponse,
     AdminUnroutedReadyResponse,
     CurrentRouteStopResponse,
@@ -96,6 +97,7 @@ def _preview(stop: RouteStop) -> RouteStopPreviewResponse:
     return RouteStopPreviewResponse(
         id=stop.id,
         order_id=stop.order_id,
+        order_number=stop.order.order_number,
         sequence=stop.sequence,
         status=RouteStopStatus(stop.status),
         customer_name=stop.order.customer_name_snapshot,
@@ -119,6 +121,16 @@ def _current(stop: RouteStop) -> CurrentRouteStopResponse:
         longitude=stop.order.delivery_longitude,
         items=_items(stop.order),
         started_at=stop.started_at,
+    )
+
+
+def _admin_stop(stop: RouteStop) -> AdminRouteStopResponse:
+    if stop.order.delivery_latitude is None or stop.order.delivery_longitude is None:
+        raise DomainError(500, "route_location_missing", "Delivery route stop location is missing")
+    return AdminRouteStopResponse(
+        **_preview(stop).model_dump(),
+        latitude=stop.order.delivery_latitude,
+        longitude=stop.order.delivery_longitude,
     )
 
 
@@ -174,7 +186,7 @@ def admin_route_detail(route: DeliveryRoute) -> AdminRouteDetailResponse:
         start_latitude=route.start_latitude,
         start_longitude=route.start_longitude,
         start_source=route.start_source,
-        stops=[_preview(stop) for stop in route.stops],
+        stops=[_admin_stop(stop) for stop in route.stops],
     )
 
 
@@ -715,6 +727,7 @@ class DeliveryRouteService:
             term = f"%{query.strip()}%"
             conditions.append(
                 or_(
+                    Order.order_number.ilike(term),
                     cast(Order.id, String).ilike(term),
                     Order.customer_name_snapshot.ilike(term),
                 )
@@ -755,6 +768,7 @@ class DeliveryRouteService:
         )
         return RiderHistoryItemResponse(
             id=order.id,
+            order_number=order.order_number,
             status=OrderStatus(order.status),
             customer_name=order.customer_name_snapshot,
             customer_area=_area(order.delivery_address_snapshot),

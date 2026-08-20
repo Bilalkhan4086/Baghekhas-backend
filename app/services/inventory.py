@@ -122,6 +122,10 @@ async def _locked_product(session: AsyncSession, product_id: str) -> Product:
 
 async def _sync_available_quantity(session: AsyncSession, product: Product) -> Decimal:
     """Synchronize the legacy aggregate with free batch stock in the current transaction."""
+    # Production sessions disable autoflush. Persist pending batch inserts and quantity
+    # changes before summing them, otherwise stock_quantity reflects the previous database
+    # state until the next inventory mutation.
+    await session.flush()
     available = await session.scalar(
         select(func.coalesce(func.sum(InventoryBatch.remaining_quantity), ZERO)).where(
             InventoryBatch.product_id == product.id

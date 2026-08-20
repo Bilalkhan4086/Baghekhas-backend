@@ -9,12 +9,16 @@ import uuid
 from dataclasses import dataclass, field
 from decimal import Decimal
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.enums import FulfillmentStatus, InventoryMode, OrderStatus, PublicationStatus
-from app.models import Order, OrderFulfillmentLine, OrderItem, Product
-from app.schemas.inventory import ProcurementRequirementResponse
+from app.exceptions import DomainError, not_found
+from app.models import ManualProcurementItem, Order, OrderFulfillmentLine, OrderItem, Product
+from app.schemas.inventory import (
+    ManualProcurementItemResponse,
+    ProcurementRequirementResponse,
+)
 
 ZERO = Decimal("0")
 
@@ -63,6 +67,14 @@ class ProcurementReadService:
         self.session = session
 
     async def requirements(self) -> list[ProcurementRequirementResponse]:
+        manual_items = list(
+            (
+                await self.session.scalars(
+                    select(ManualProcurementItem)
+                )
+            ).all()
+        )
+        manual_by_product = {item.product_id: item for item in manual_items}
         fulfillment_rows = (
             await self.session.execute(
                 select(OrderFulfillmentLine, OrderItem)
@@ -105,13 +117,20 @@ class ProcurementReadService:
         products = (
             await self.session.scalars(
                 select(Product)
-                .where(Product.inventory_mode == InventoryMode.TRACKED.value)
+                .where(
+                    or_(
+                        Product.inventory_mode == InventoryMode.TRACKED.value,
+                        Product.id.in_(list(manual_by_product)),
+                    )
+                )
                 .order_by(Product.name.asc(), Product.id.asc())
             )
         ).all()
         requirements: list[ProcurementRequirementResponse] = []
         for product in products:
             demand = demand_by_product.get(product.id, _ProcurementDemand())
+            manual_item = manual_by_product.get(product.id)
+            manual_quantity = manual_item.quantity if manual_item is not None else ZERO
             projection = project_procurement(
                 current_stock=product.stock_quantity,
                 low_stock_threshold=product.low_stock_threshold,
@@ -122,7 +141,11 @@ class ProcurementReadService:
                 product.publication_status != PublicationStatus.ARCHIVED.value
                 and projection.projected_stock <= product.low_stock_threshold
             )
-            if projection.order_shortage <= ZERO and not should_replenish:
+            if (
+                projection.order_shortage <= ZERO
+                and not should_replenish
+                and manual_quantity <= ZERO
+            ):
                 continue
 
             order_ids = list(demand.confirmed_order_ids)
@@ -139,12 +162,77 @@ class ProcurementReadService:
                     pending_order_quantity=demand.pending_quantity,
                     shortage_quantity=projection.order_shortage,
                     low_stock_replenishment_quantity=projection.low_stock_replenishment,
-                    suggested_purchase_quantity=projection.suggested_purchase,
+                    suggested_purchase_quantity=projection.suggested_purchase + manual_quantity,
                     low_stock_threshold=product.low_stock_threshold,
                     affected_order_count=len(order_ids),
                     pending_order_count=len(demand.pending_order_ids),
                     procurement_in_progress=demand.procurement_in_progress,
+                    manual_quantity=manual_quantity,
+                    manual_note=manual_item.note if manual_item is not None else None,
                     order_ids=order_ids,
                 )
             )
         return requirements
+
+
+class ManualProcurementService:
+    """Persist an administrator's extra quantity on the generated buying list."""
+
+    def __init__(self, session: AsyncSession) -> None:
+        self.session = session
+
+    async def set_item(
+        self,
+        *,
+        product_id: str,
+        quantity: Decimal,
+        note: str | None,
+        admin_id: uuid.UUID,
+    ) -> ManualProcurementItemResponse:
+        async with self.session.begin():
+            product = await self.session.scalar(
+                select(Product).where(Product.id == product_id).with_for_update()
+            )
+            if product is None:
+                raise not_found("Product")
+            if product.inventory_mode != InventoryMode.TRACKED.value:
+                raise DomainError(
+                    409,
+                    "procurement_requires_tracked_product",
+                    "Only tracked products can be added to procurement",
+                )
+            if product.publication_status == PublicationStatus.ARCHIVED.value:
+                raise DomainError(
+                    409,
+                    "archived_product_procurement",
+                    "Archived products cannot be added to procurement",
+                )
+            item = await self.session.scalar(
+                select(ManualProcurementItem)
+                .where(ManualProcurementItem.product_id == product_id)
+                .with_for_update()
+            )
+            if item is None:
+                item = ManualProcurementItem(
+                    product_id=product_id,
+                    quantity=quantity,
+                    note=note,
+                    created_by_id=admin_id,
+                )
+                self.session.add(item)
+            else:
+                item.quantity = quantity
+                item.note = note
+                item.created_by_id = admin_id
+        return ManualProcurementItemResponse.model_validate(item)
+
+    async def remove_item(self, product_id: str) -> None:
+        async with self.session.begin():
+            item = await self.session.scalar(
+                select(ManualProcurementItem)
+                .where(ManualProcurementItem.product_id == product_id)
+                .with_for_update()
+            )
+            if item is None:
+                raise not_found("Manual procurement item")
+            await self.session.delete(item)

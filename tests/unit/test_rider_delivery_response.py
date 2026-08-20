@@ -19,6 +19,7 @@ def test_rider_list_area_does_not_treat_a_two_part_street_address_as_an_area() -
 def test_rider_detail_uses_order_delivery_snapshot() -> None:
     order = Order(
         id=uuid.uuid4(),
+        order_number="AB2CDE",
         customer_phone="+923001234567",
         customer_name_snapshot="Original Name",
         delivery_address_snapshot="Original Address",

@@ -85,7 +85,10 @@ async def create_product(
     # Keep validated Decimal values as Decimal objects for SQLAlchemy model properties.
     # JSON mode converts quantities to strings, which breaks computed properties such as
     # Product.low_stock before the ORM instance is reloaded from PostgreSQL.
-    values = payload.model_dump(mode="python", exclude={"opening_stock"})
+    values = payload.model_dump(mode="python", exclude={"opening_stock", "image_urls"})
+    image_urls = payload.image_urls or [payload.image_url]
+    values["image_url"] = image_urls[0]
+    values["gallery_image_urls"] = image_urls[1:]
     values["stock_quantity"] = Decimal("0")
     product = Product(**values)
     actor_id = actor.id
@@ -116,6 +119,13 @@ async def create_product(
 async def update_product(session: AsyncSession, product_id: str, payload: ProductUpdate) -> Product:
     product = await get_product_for_admin(session, product_id)
     values = payload.model_dump(mode="python", exclude_unset=True)
+    image_urls = values.pop("image_urls", None)
+    if image_urls is not None:
+        values["image_url"] = image_urls[0]
+        values["gallery_image_urls"] = image_urls[1:]
+    elif "image_url" in values:
+        # Preserve the legacy single-image replacement contract.
+        values["gallery_image_urls"] = []
 
     if "manual_available" in values and product.inventory_mode == InventoryMode.TRACKED.value:
         raise DomainError(

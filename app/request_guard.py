@@ -90,8 +90,8 @@ class RequestGuardMiddleware:
         if path in {"/api/v1/auth/login", "/api/v1/rider/auth/login"}:
             bucket = "login"
             limit = self.login_requests_per_minute
-        elif path == "/api/v1/orders":
-            bucket = "public-order"
+        elif path in {"/api/v1/orders", "/api/v1/orders/track"}:
+            bucket = "public-order" if path == "/api/v1/orders" else "order-tracking"
             limit = self.public_order_requests_per_minute
         else:
             return None

@@ -10,6 +10,7 @@ from pydantic import Field, model_validator
 
 from app.enums import DeliveryRouteStatus, NotReceivedReason, OrderStatus, RouteStopStatus
 from app.schemas.common import APIModel
+from app.schemas.orders import OrderNumber
 from app.schemas.rider import RiderOrderItemResponse
 
 
@@ -43,6 +44,7 @@ class RouteProgressResponse(APIModel):
 class RouteStopPreviewResponse(APIModel):
     id: uuid.UUID
     order_id: uuid.UUID
+    order_number: OrderNumber
     sequence: int
     status: RouteStopStatus
     customer_name: str
@@ -61,6 +63,11 @@ class CurrentRouteStopResponse(RouteStopPreviewResponse):
     longitude: Decimal
     items: list[RiderOrderItemResponse]
     started_at: datetime | None
+
+
+class AdminRouteStopResponse(RouteStopPreviewResponse):
+    latitude: Decimal
+    longitude: Decimal
 
 
 class RiderRouteResponse(APIModel):
@@ -102,6 +109,7 @@ class RouteNotReceivedRequest(APIModel):
 
 class RiderHistoryItemResponse(APIModel):
     id: uuid.UUID
+    order_number: OrderNumber
     status: OrderStatus
     customer_name: str
     customer_area: str
@@ -145,7 +153,7 @@ class AdminRouteDetailResponse(AdminRouteSummaryResponse):
     start_latitude: Decimal
     start_longitude: Decimal
     start_source: str
-    stops: list[RouteStopPreviewResponse]
+    stops: list[AdminRouteStopResponse]
 
 
 class OrderRouteStateResponse(APIModel):

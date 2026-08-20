@@ -10,6 +10,7 @@ from pydantic import Field, field_validator
 
 from app.enums import OrderStatus
 from app.schemas.common import APIModel
+from app.schemas.orders import OrderNumber
 
 
 class RiderLoginRequest(APIModel):
@@ -60,6 +61,7 @@ class RiderOrderItemResponse(APIModel):
 
 class RiderDeliveryListResponse(APIModel):
     id: uuid.UUID
+    order_number: OrderNumber
     status: OrderStatus
     customer_name: str
     customer_area: str
@@ -69,6 +71,7 @@ class RiderDeliveryListResponse(APIModel):
 
 class RiderDeliveryDetailResponse(APIModel):
     id: uuid.UUID
+    order_number: OrderNumber
     status: OrderStatus
     customer_name: str
     customer_phone: str

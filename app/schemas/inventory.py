@@ -195,7 +195,48 @@ class ProcurementRequirementResponse(APIModel):
     affected_order_count: int
     pending_order_count: int
     procurement_in_progress: bool
+    manual_quantity: Quantity = Decimal("0")
+    manual_note: str | None = None
     order_ids: list[uuid.UUID]
+
+
+class ManualProcurementItemCreate(APIModel):
+    product_id: str = Field(min_length=1, max_length=120)
+    quantity: Quantity
+    note: str | None = Field(default=None, max_length=500)
+
+    @field_validator("quantity")
+    @classmethod
+    def validate_quantity(cls, value: Decimal) -> Decimal:
+        value = validate_quantity_precision(value)
+        if value <= 0:
+            raise ValueError("Manual procurement quantity must be greater than zero")
+        return value
+
+    @field_validator("product_id")
+    @classmethod
+    def strip_product_id(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("Product is required")
+        return value
+
+    @field_validator("note")
+    @classmethod
+    def strip_note(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return value.strip() or None
+
+
+class ManualProcurementItemResponse(APIModel):
+    id: uuid.UUID
+    product_id: str
+    quantity: Quantity
+    note: str | None
+    created_by_id: uuid.UUID
+    created_at: datetime
+    updated_at: datetime
 
 
 InventoryMovementPage = Page[InventoryMovementDetailResponse]

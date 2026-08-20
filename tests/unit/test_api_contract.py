@@ -17,6 +17,7 @@ def test_openapi_contains_public_and_admin_routes() -> None:
     schema = app.openapi()
     paths = schema["paths"]
     assert "/api/v1/orders" in paths
+    assert "/api/v1/orders/track" in paths
     assert "/api/v1/catalog/products" in paths
     assert "/api/v1/auth/login" in paths
     assert "/api/v1/auth/refresh" in paths
@@ -38,6 +39,11 @@ def test_openapi_contains_public_and_admin_routes() -> None:
     assert "/api/v1/admin/inventory/waste" in paths
     assert "/api/v1/admin/inventory/adjustments" in paths
     assert "/api/v1/admin/inventory/procurement" in paths
+    assert "/api/v1/admin/inventory/procurement-items" in paths
+    assert "/api/v1/admin/inventory/procurement-items/{product_id}" in paths
+    assert "/api/v1/admin/expenses" in paths
+    assert "/api/v1/admin/expenses/{expense_id}/void" in paths
+    assert "/api/v1/admin/reports/business" in paths
     assert "/api/v1/admin/orders/{order_id}/confirm" in paths
     assert "/api/v1/admin/orders/{order_id}/start-packing" in paths
     assert "/api/v1/admin/orders/{order_id}/dispatch" in paths
@@ -76,10 +82,34 @@ def test_delivery_charge_override_is_admin_only() -> None:
 def test_public_catalog_schema_excludes_operations_fields() -> None:
     schema = app.openapi()
     fields = schema["components"]["schemas"]["CatalogProductResponse"]["properties"]
-    assert {"is_available", "availability"}.issubset(fields)
+    assert {
+        "image_url",
+        "image_urls",
+        "is_popular",
+        "is_available",
+        "availability",
+    }.issubset(fields)
     assert not {"stock_quantity", "inventory_mode", "manual_available", "cogs_pkr"}.intersection(
         fields
     )
+
+
+def test_public_tracking_schema_excludes_private_order_fields() -> None:
+    schema = app.openapi()
+    fields = schema["components"]["schemas"]["PublicOrderTrackingResponse"]["properties"]
+
+    assert {"order_number", "status", "items", "status_history"}.issubset(fields)
+    assert not {
+        "id",
+        "customer",
+        "delivery_address",
+        "delivery_latitude",
+        "delivery_longitude",
+        "rider_id",
+        "admin_note",
+        "internal_fulfillment_status",
+        "total_pkr",
+    }.intersection(fields)
 
 
 def test_validation_errors_use_consistent_shape() -> None:
@@ -165,6 +195,31 @@ def test_cors_preflight_allows_delete_requests() -> None:
             "POST",
             "/api/v1/admin/inventory/adjustments",
             {"product_id": "mango", "delta": "1", "reason": "restock"},
+        ),
+        (
+            "POST",
+            "/api/v1/admin/inventory/procurement-items",
+            {"product_id": "mango", "quantity": "1"},
+        ),
+        (
+            "DELETE",
+            "/api/v1/admin/inventory/procurement-items/mango",
+            None,
+        ),
+        (
+            "POST",
+            "/api/v1/admin/expenses",
+            {
+                "expense_date": "2026-08-19",
+                "category": "utilities",
+                "description": "Electricity",
+                "amount_pkr": 5000,
+            },
+        ),
+        (
+            "POST",
+            "/api/v1/admin/expenses/00000000-0000-0000-0000-000000000001/void",
+            None,
         ),
     ],
 )

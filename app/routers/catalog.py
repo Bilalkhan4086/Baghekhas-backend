@@ -1,14 +1,14 @@
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Annotated
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, Query
-from sqlalchemy import and_, func, or_, select
+from sqlalchemy import func, or_, select
 
 from app.dependencies import SessionDep, SettingsDep
-from app.enums import InventoryMode, PublicationStatus, StockPolicy
+from app.enums import CatalogType, OrderStatus, PublicationStatus
 from app.exceptions import not_found
-from app.models import Product
+from app.models import Order, OrderItem, Product
 from app.schemas.common import Page
 from app.schemas.orders import DeliveryQuoteResponse
 from app.schemas.products import CatalogProductResponse
@@ -25,39 +25,46 @@ async def list_catalog_products(
     page_size: int = Query(default=24, ge=1, le=100),
     q: str | None = Query(default=None, max_length=200),
     category: str | None = Query(default=None, max_length=80),
+    catalog_type: CatalogType | None = None,
+    is_popular: bool | None = None,
+    sort: Literal["name", "popular"] = "name",
 ) -> Page[CatalogProductResponse]:
-    filters = [
-        Product.publication_status == PublicationStatus.ACTIVE.value,
-        or_(
-            and_(
-                Product.inventory_mode == InventoryMode.TRACKED.value,
-                or_(
-                    Product.stock_quantity > 0,
-                    Product.stock_policy.in_(
-                        [StockPolicy.ARRANGE_ON_DEMAND.value, StockPolicy.PREORDER.value]
-                    ),
-                ),
-            ),
-            and_(
-                Product.inventory_mode == InventoryMode.UNTRACKED.value,
-                Product.manual_available.is_(True),
-            ),
-        ),
-    ]
+    filters = [Product.publication_status != PublicationStatus.ARCHIVED.value]
     if q:
         term = f"%{q.strip()}%"
         filters.append(or_(Product.name.ilike(term), Product.id.ilike(term)))
     if category:
         filters.append(Product.category == category)
+    if catalog_type:
+        filters.append(Product.catalog_type == catalog_type.value)
+    if is_popular is not None:
+        filters.append(Product.is_popular.is_(is_popular))
 
     total = await session.scalar(select(func.count()).select_from(Product).where(*filters))
+    statement = select(Product).where(*filters)
+    if sort == "popular":
+        sold_quantities = (
+            select(
+                OrderItem.product_id,
+                func.sum(OrderItem.quantity).label("sold_quantity"),
+            )
+            .join(Order, Order.id == OrderItem.order_id)
+            .where(Order.status.in_([OrderStatus.DELIVERED.value, OrderStatus.COMPLETED.value]))
+            .group_by(OrderItem.product_id)
+            .subquery()
+        )
+        statement = statement.outerjoin(
+            sold_quantities, sold_quantities.c.product_id == Product.id
+        ).order_by(
+            func.coalesce(sold_quantities.c.sold_quantity, 0).desc(),
+            Product.name.asc(),
+            Product.id.asc(),
+        )
+    else:
+        statement = statement.order_by(Product.name.asc(), Product.id.asc())
     products = (
         await session.scalars(
-            select(Product)
-            .where(*filters)
-            .order_by(Product.name.asc(), Product.id.asc())
-            .offset((page - 1) * page_size)
-            .limit(page_size)
+            statement.offset((page - 1) * page_size).limit(page_size)
         )
     ).all()
     return Page[CatalogProductResponse](
@@ -71,7 +78,7 @@ async def list_catalog_products(
 @router.get("/products/{product_id}", response_model=CatalogProductResponse)
 async def get_catalog_product(product_id: str, session: SessionDep) -> CatalogProductResponse:
     product = await session.get(Product, product_id)
-    if product is None or product.publication_status != PublicationStatus.ACTIVE.value:
+    if product is None or product.publication_status == PublicationStatus.ARCHIVED.value:
         raise not_found("Product")
     return _catalog_response(product)
 
@@ -82,6 +89,7 @@ def _catalog_response(product: Product) -> CatalogProductResponse:
         name=product.name,
         description=product.description,
         image_url=product.image_url,
+        image_urls=product.image_urls,
         category=product.category,
         catalog_type=product.catalog_type,
         unit_label=product.unit_label,
@@ -90,6 +98,7 @@ def _catalog_response(product: Product) -> CatalogProductResponse:
         compare_at_price_pkr=product.compare_at_price_pkr,
         pricing_type=product.pricing_type,
         publication_status=product.publication_status,
+        is_popular=product.is_popular,
         is_available=product.available,
         availability=product.customer_availability,
     )

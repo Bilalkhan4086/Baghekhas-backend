@@ -12,6 +12,7 @@ from app.schemas.products import validate_quantity_precision
 OrderQuantity = Annotated[Decimal, Field(gt=0, le=99, max_digits=12, decimal_places=3)]
 FulfillmentQuantity = Annotated[Decimal, Field(ge=0, max_digits=12, decimal_places=3)]
 DeliveryDistance = Annotated[Decimal, Field(ge=0, max_digits=8, decimal_places=3)]
+OrderNumber = Annotated[str, Field(pattern=r"^[2-9A-HJ-NP-Z]{6}$")]
 
 
 class DeliveryLocationInput(APIModel):
@@ -138,6 +139,7 @@ class RiderReassignmentRequest(APIModel):
 
 class OrderSummaryResponse(APIModel):
     id: uuid.UUID
+    order_number: OrderNumber
     status: OrderStatus
     subtotal_pkr: int
     delivery_charge_pkr: int
@@ -157,6 +159,7 @@ class OrderSummaryResponse(APIModel):
 
 class OrderResponse(APIModel):
     id: uuid.UUID
+    order_number: OrderNumber
     status: OrderStatus
     subtotal_pkr: int
     delivery_charge_pkr: int
@@ -183,6 +186,7 @@ class OrderResponse(APIModel):
 
 class PublicOrderResponse(APIModel):
     id: uuid.UUID
+    order_number: OrderNumber
     status: OrderStatus
     subtotal_pkr: int
     delivery_charge_pkr: int
@@ -197,6 +201,38 @@ class PublicOrderResponse(APIModel):
     )
     items: list[OrderItemResponse]
     status_history: list[OrderStatusHistoryResponse]
+    created_at: datetime
+    updated_at: datetime
+
+
+class OrderTrackingRequest(APIModel):
+    order_number: OrderNumber
+    phone: str = Field(min_length=1, max_length=30)
+
+    @field_validator("order_number", mode="before")
+    @classmethod
+    def normalize_order_number(cls, value: object) -> object:
+        return value.strip().upper() if isinstance(value, str) else value
+
+
+class PublicOrderTrackingItem(APIModel):
+    product_name: str
+    quantity: OrderQuantity
+    unit_label: str | None = None
+
+
+class PublicOrderTrackingEvent(APIModel):
+    status: OrderStatus
+    created_at: datetime
+
+
+class PublicOrderTrackingResponse(APIModel):
+    order_number: OrderNumber
+    status: OrderStatus
+    promised_delivery_date: date | None
+    promised_delivery_time: time | None
+    items: list[PublicOrderTrackingItem]
+    status_history: list[PublicOrderTrackingEvent]
     created_at: datetime
     updated_at: datetime
 

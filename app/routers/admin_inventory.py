@@ -13,6 +13,8 @@ from app.schemas.inventory import (
     InventoryBatchResponse,
     InventoryMovementDetailResponse,
     InventorySummaryResponse,
+    ManualProcurementItemCreate,
+    ManualProcurementItemResponse,
     ProcurementRequirementResponse,
     PurchaseCreate,
     PurchasePage,
@@ -29,6 +31,7 @@ from app.services.inventory import (
     PurchaseService,
     WasteService,
 )
+from app.services.procurement import ManualProcurementService
 
 router = APIRouter(prefix="/admin", tags=["admin inventory"])
 
@@ -245,3 +248,36 @@ async def get_procurement_requirements(
     session: SessionDep, _admin: CurrentAdmin
 ) -> list[ProcurementRequirementResponse]:
     return await InventoryReadService(session).procurement_requirements()
+
+
+@router.post(
+    "/inventory/procurement-items",
+    response_model=ManualProcurementItemResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def set_manual_procurement_item(
+    payload: ManualProcurementItemCreate,
+    session: SessionDep,
+    admin: CurrentAdmin,
+) -> ManualProcurementItemResponse:
+    admin_id = admin.id
+    await _clear_read_transaction(session)
+    return await ManualProcurementService(session).set_item(
+        product_id=payload.product_id,
+        quantity=payload.quantity,
+        note=payload.note,
+        admin_id=admin_id,
+    )
+
+
+@router.delete(
+    "/inventory/procurement-items/{product_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def remove_manual_procurement_item(
+    product_id: str,
+    session: SessionDep,
+    _admin: CurrentAdmin,
+) -> None:
+    await _clear_read_transaction(session)
+    await ManualProcurementService(session).remove_item(product_id)

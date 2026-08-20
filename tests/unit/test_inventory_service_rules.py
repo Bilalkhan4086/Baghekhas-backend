@@ -1,6 +1,7 @@
 import uuid
 from datetime import UTC, datetime
 from decimal import Decimal
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
@@ -114,6 +115,31 @@ def test_procurement_projection_uses_new_stock_before_recommending_another_purch
     assert projection.order_shortage == Decimal("0")
     assert projection.low_stock_replenishment == Decimal("0")
     assert projection.suggested_purchase == Decimal("0")
+
+
+@pytest.mark.asyncio
+async def test_stock_sync_flushes_pending_batches_before_calculating_total() -> None:
+    class NoAutoflushSession:
+        flushed = False
+
+        async def flush(self) -> None:
+            self.flushed = True
+
+        async def scalar(self, _statement: object) -> Decimal:
+            # With production's autoflush=False, the aggregate can see pending batch
+            # changes only after the service explicitly flushes them.
+            assert self.flushed
+            return Decimal("8.000")
+
+    session = NoAutoflushSession()
+    product = SimpleNamespace(id="mango", stock_quantity=Decimal("0"))
+
+    quantity = await inventory_module._sync_available_quantity(  # type: ignore[arg-type]
+        session, product
+    )
+
+    assert quantity == Decimal("8.000")
+    assert product.stock_quantity == Decimal("8.000")
 
 
 @pytest.mark.asyncio

@@ -53,6 +53,7 @@ def _customer_area(address: str) -> str:
 def _list_response(order: Order) -> RiderDeliveryListResponse:
     return RiderDeliveryListResponse(
         id=order.id,
+        order_number=order.order_number,
         status=OrderStatus(order.status),
         customer_name=order.customer_name_snapshot,
         customer_area=_customer_area(order.delivery_address_snapshot),
@@ -64,6 +65,7 @@ def _list_response(order: Order) -> RiderDeliveryListResponse:
 def _detail_response(order: Order) -> RiderDeliveryDetailResponse:
     return RiderDeliveryDetailResponse(
         id=order.id,
+        order_number=order.order_number,
         status=OrderStatus(order.status),
         customer_name=order.customer_name_snapshot,
         customer_phone=order.customer.phone,

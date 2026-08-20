@@ -6,8 +6,9 @@ from unittest.mock import AsyncMock
 import pytest
 from pydantic import ValidationError
 
-from app.enums import InventoryMode, PublicationStatus, StockPolicy
+from app.enums import CatalogType, InventoryMode, PublicationStatus, StockPolicy
 from app.models import AdminUser, Product
+from app.routers.catalog import list_catalog_products
 from app.schemas.products import (
     InventoryAdjustmentCreate,
     InventoryMovementResponse,
@@ -32,6 +33,7 @@ def make_product(**overrides: object) -> Product:
         "base_price_pkr": 500,
         "pricing_type": "fixed",
         "publication_status": "active",
+        "is_popular": False,
         "inventory_mode": "untracked",
         "manual_available": True,
         "stock_quantity": Decimal("0"),
@@ -106,6 +108,80 @@ def test_low_stock_applies_only_to_tracked_products() -> None:
     assert untracked.low_stock is False
 
 
+class _ProductRowsStub:
+    def __init__(self, products: list[Product]) -> None:
+        self.products = products
+
+    def all(self) -> list[Product]:
+        return self.products
+
+
+class _CatalogSessionStub:
+    def __init__(self, products: list[Product]) -> None:
+        self.products = products
+        self.list_statement = None
+
+    async def scalar(self, _statement: object) -> int:
+        return len(self.products)
+
+    async def scalars(self, statement: object) -> _ProductRowsStub:
+        self.list_statement = statement
+        return _ProductRowsStub(self.products)
+
+
+@pytest.mark.asyncio
+async def test_popular_catalog_sort_uses_only_realized_order_quantities() -> None:
+    session = _CatalogSessionStub([make_product(gallery_image_urls=[])])
+
+    page = await list_catalog_products(
+        session,  # type: ignore[arg-type]
+        page=1,
+        page_size=4,
+        q=None,
+        category=None,
+        catalog_type=CatalogType.PRODUCT,
+        is_popular=None,
+        sort="popular",
+    )
+
+    statement = str(session.list_statement)
+    assert "sum(order_items.quantity)" in statement
+    assert "orders.status IN" in statement
+    assert page.items[0].image_urls == ["/mango.png"]
+
+
+@pytest.mark.asyncio
+async def test_catalog_hides_only_archived_and_can_filter_popular_products() -> None:
+    product = make_product(
+        publication_status=PublicationStatus.COMING_SOON.value,
+        is_popular=True,
+        inventory_mode=InventoryMode.TRACKED.value,
+        stock_quantity=Decimal("0"),
+        stock_policy=StockPolicy.IN_STOCK_ONLY.value,
+        gallery_image_urls=[],
+    )
+    session = _CatalogSessionStub([product])
+
+    page = await list_catalog_products(
+        session,  # type: ignore[arg-type]
+        page=1,
+        page_size=4,
+        q=None,
+        category=None,
+        catalog_type=CatalogType.PRODUCT,
+        is_popular=True,
+        sort="name",
+    )
+
+    where_clause = str(session.list_statement.whereclause)
+    assert "products.publication_status !=" in where_clause
+    assert "products.is_popular IS true" in where_clause
+    assert "products.stock_quantity" not in where_clause
+    assert "products.manual_available" not in where_clause
+    assert page.items[0].is_popular is True
+    assert page.items[0].is_available is False
+
+
 class _ProductSessionStub:
     def __init__(self) -> None:
         self.refreshed = None
@@ -149,6 +225,7 @@ async def test_create_product_preserves_decimal_threshold_and_refreshes_response
         inventory_mode="tracked",
         opening_stock="0.000",
         low_stock_threshold="5.000",
+        is_popular=True,
     )
     actor = AdminUser(
         id=uuid.uuid4(),
@@ -162,7 +239,40 @@ async def test_create_product_preserves_decimal_threshold_and_refreshes_response
     assert created.low_stock_threshold == Decimal("5.000")
     assert isinstance(created.low_stock_threshold, Decimal)
     assert created.low_stock is True
+    assert created.image_urls == ["https://example.com/mango.webp"]
+    assert created.is_popular is True
     assert session.refreshed is created
+
+
+def test_product_create_accepts_an_ordered_image_gallery() -> None:
+    payload = ProductCreate(
+        id="seasonal-mango",
+        name="Seasonal Mango",
+        description="Fresh mangoes",
+        image_url="https://example.com/mango-main.webp",
+        image_urls=[
+            "https://example.com/mango-main.webp",
+            "https://example.com/mango-box.webp",
+        ],
+        catalog_type="product",
+        unit_label="kg",
+        base_price_pkr=500,
+    )
+
+    assert payload.image_urls == [
+        "https://example.com/mango-main.webp",
+        "https://example.com/mango-box.webp",
+    ]
+
+
+def test_product_gallery_rejects_duplicate_images() -> None:
+    with pytest.raises(ValidationError, match="must be unique"):
+        ProductUpdate(image_urls=["/mango.png", "/mango.png"])
+
+
+def test_product_gallery_primary_must_match_image_url() -> None:
+    with pytest.raises(ValidationError, match="must match"):
+        ProductUpdate(image_url="/primary.png", image_urls=["/other.png"])
 
 
 def test_quantity_precision_is_limited_to_three_decimals() -> None:

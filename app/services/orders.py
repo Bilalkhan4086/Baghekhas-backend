@@ -33,9 +33,18 @@ from app.models import (
     OrderStatusHistory,
     Product,
     RouteStop,
+    generate_order_number,
 )
 from app.schemas.common import Page
-from app.schemas.orders import OrderAdminUpdate, OrderCreate, OrderSummaryResponse
+from app.schemas.orders import (
+    OrderAdminUpdate,
+    OrderCreate,
+    OrderSummaryResponse,
+    OrderTrackingRequest,
+    PublicOrderTrackingEvent,
+    PublicOrderTrackingItem,
+    PublicOrderTrackingResponse,
+)
 from app.services.delivery import (
     KARACHI,
     DeliveryScheduleService,
@@ -50,6 +59,22 @@ DELIVERY_TIER_SIZE_KM = Decimal("2")
 DELIVERY_TIER_CHARGE_PKR = 50
 MAXIMUM_DELIVERY_CHARGE_PKR = 350
 EARTH_RADIUS_KM = 6371.0088
+ORDER_NUMBER_GENERATION_ATTEMPTS = 10
+
+
+async def generate_unique_order_number(session: AsyncSession) -> str:
+    for _ in range(ORDER_NUMBER_GENERATION_ATTEMPTS):
+        order_number = generate_order_number()
+        exists = await session.scalar(
+            select(Order.id).where(Order.order_number == order_number).limit(1)
+        )
+        if exists is None:
+            return order_number
+    raise DomainError(
+        503,
+        "order_number_unavailable",
+        "An order number could not be allocated; please retry",
+    )
 
 
 def normalize_pakistani_phone(value: str) -> str:
@@ -286,6 +311,7 @@ async def create_order(
     )
     delivery_schedule = DeliveryScheduleService(delivery_cutoff_hour, delivery_default_time)
     order = Order(
+        order_number=await generate_unique_order_number(session),
         customer_phone=phone,
         customer_name_snapshot=payload.customer.name,
         delivery_address_snapshot=payload.customer.address,
@@ -358,6 +384,7 @@ async def list_admin_orders(
         term = f"%{query.strip()}%"
         filters.append(
             or_(
+                Order.order_number.ilike(term),
                 Order.customer_name_snapshot.ilike(term),
                 Order.customer_phone.ilike(term),
                 sql_cast(Order.id, String).ilike(term),
@@ -383,6 +410,7 @@ async def list_admin_orders(
     items = [
         OrderSummaryResponse(
             id=order.id,
+            order_number=order.order_number,
             status=order.status,
             subtotal_pkr=order.subtotal_pkr,
             delivery_charge_pkr=order.delivery_charge_pkr,
@@ -406,6 +434,43 @@ async def list_admin_orders(
         page=page,
         page_size=page_size,
         total=total or 0,
+    )
+
+
+async def track_public_order(
+    session: AsyncSession, payload: OrderTrackingRequest
+) -> PublicOrderTrackingResponse:
+    phone = normalize_pakistani_phone(payload.phone)
+    order_id = await session.scalar(
+        select(Order.id).where(
+            Order.order_number == payload.order_number,
+            Order.customer_phone == phone,
+        )
+    )
+    if order_id is None:
+        raise not_found("Order")
+    order = cast(Order | None, await session.scalar(order_load_statement(order_id)))
+    if order is None:
+        raise not_found("Order")
+    return PublicOrderTrackingResponse(
+        order_number=order.order_number,
+        status=order.status,
+        promised_delivery_date=order.promised_delivery_date,
+        promised_delivery_time=order.promised_delivery_time,
+        items=[
+            PublicOrderTrackingItem(
+                product_name=item.product_name,
+                quantity=item.quantity,
+                unit_label=item.unit_label,
+            )
+            for item in order.items
+        ],
+        status_history=[
+            PublicOrderTrackingEvent(status=event.to_status, created_at=event.created_at)
+            for event in order.status_history
+        ],
+        created_at=order.created_at,
+        updated_at=order.updated_at,
     )
 
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import secrets
 import uuid
 from datetime import date, datetime, time
 from decimal import Decimal
@@ -23,6 +24,14 @@ from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, column_property, mapped_column, relationship
 
 from app.enums import InventoryMode, PublicationStatus, StockPolicy
+
+ORDER_NUMBER_ALPHABET = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ"
+ORDER_NUMBER_LENGTH = 6
+
+
+def generate_order_number() -> str:
+    """Generate a customer-friendly public reference without ambiguous characters."""
+    return "".join(secrets.choice(ORDER_NUMBER_ALPHABET) for _ in range(ORDER_NUMBER_LENGTH))
 
 
 class Base(DeclarativeBase):
@@ -97,6 +106,11 @@ class Product(TimestampMixin, Base):
             "('in_stock_only', 'arrange_on_demand', 'preorder')",
             name="products_stock_policy_valid",
         ),
+        CheckConstraint(
+            "jsonb_typeof(gallery_image_urls) = 'array' "
+            "AND jsonb_array_length(gallery_image_urls) <= 7",
+            name="products_gallery_images_valid",
+        ),
         Index("products_category_idx", "category"),
         Index("products_publication_status_idx", "publication_status"),
     )
@@ -105,6 +119,9 @@ class Product(TimestampMixin, Base):
     name: Mapped[str] = mapped_column(String(200), nullable=False)
     description: Mapped[str] = mapped_column(Text, nullable=False)
     image_url: Mapped[str] = mapped_column(String(1000), nullable=False)
+    gallery_image_urls: Mapped[list[str]] = mapped_column(
+        JSONB, default=list, server_default=text("'[]'::jsonb"), nullable=False
+    )
     category: Mapped[str | None] = mapped_column(String(80))
     catalog_type: Mapped[str] = mapped_column(String(20), nullable=False)
     unit_label: Mapped[str] = mapped_column(String(40), nullable=False)
@@ -113,6 +130,9 @@ class Product(TimestampMixin, Base):
     compare_at_price_pkr: Mapped[int | None] = mapped_column(Integer)
     pricing_type: Mapped[str] = mapped_column(String(20), nullable=False)
     publication_status: Mapped[str] = mapped_column(String(20), nullable=False)
+    is_popular: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="false", nullable=False
+    )
     inventory_mode: Mapped[str] = mapped_column(String(20), nullable=False)
     manual_available: Mapped[bool] = mapped_column(
         Boolean, default=True, server_default="true", nullable=False
@@ -142,6 +162,11 @@ class Product(TimestampMixin, Base):
     def effective_stock_policy(self) -> str:
         """Use arrange-on-demand for products created before policy selection existed."""
         return self.stock_policy or StockPolicy.ARRANGE_ON_DEMAND.value
+
+    @property
+    def image_urls(self) -> list[str]:
+        """Expose the primary image followed by unique secondary gallery images."""
+        return list(dict.fromkeys([self.image_url, *(self.gallery_image_urls or [])]))[:8]
 
     @property
     def available(self) -> bool:
@@ -254,6 +279,11 @@ class Order(TimestampMixin, Base):
             "(status <> 'refunded' AND refund_amount_pkr IS NULL)",
             name="orders_refund_status_valid",
         ),
+        CheckConstraint(
+            "order_number ~ '^[2-9A-HJ-NP-Z]{6}$'",
+            name="orders_order_number_format_valid",
+        ),
+        Index("orders_order_number_uidx", "order_number", unique=True),
         Index("orders_customer_phone_idx", "customer_phone"),
         Index("orders_created_at_idx", "created_at"),
         Index("orders_status_created_at_idx", "status", "created_at"),
@@ -266,6 +296,9 @@ class Order(TimestampMixin, Base):
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    order_number: Mapped[str] = mapped_column(
+        String(6), default=generate_order_number, nullable=False
+    )
     customer_phone: Mapped[str] = mapped_column(Text, ForeignKey("customers.phone"), nullable=False)
     notes: Mapped[str | None] = mapped_column(String(500))
     status: Mapped[str] = mapped_column(
@@ -640,6 +673,65 @@ class WasteRecord(Base):
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class ManualProcurementItem(TimestampMixin, Base):
+    __tablename__ = "manual_procurement_items"
+    __table_args__ = (
+        CheckConstraint("quantity > 0", name="manual_procurement_items_quantity_positive"),
+        UniqueConstraint("product_id", name="manual_procurement_items_product_key"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    product_id: Mapped[str] = mapped_column(
+        String(120), ForeignKey("products.id", ondelete="RESTRICT"), nullable=False
+    )
+    quantity: Mapped[Decimal] = mapped_column(Numeric(12, 3), nullable=False)
+    note: Mapped[str | None] = mapped_column(String(500))
+    created_by_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("admin_users.id", ondelete="RESTRICT"), nullable=False
+    )
+
+    product: Mapped[Product] = relationship(lazy="raise")
+    created_by: Mapped[AdminUser] = relationship(lazy="raise")
+
+
+class Expense(TimestampMixin, Base):
+    __tablename__ = "expenses"
+    __table_args__ = (
+        CheckConstraint("amount_pkr > 0", name="expenses_amount_positive"),
+        CheckConstraint(
+            "category IN ('salaries', 'rent', 'utilities', 'fuel', 'delivery', "
+            "'marketing', 'maintenance', 'packaging', 'taxes_and_fees', 'miscellaneous')",
+            name="expenses_category_valid",
+        ),
+        CheckConstraint("status IN ('active', 'voided')", name="expenses_status_valid"),
+        CheckConstraint(
+            "(status = 'active' AND voided_at IS NULL AND voided_by_id IS NULL) OR "
+            "(status = 'voided' AND voided_at IS NOT NULL AND voided_by_id IS NOT NULL)",
+            name="expenses_void_state_valid",
+        ),
+        Index("expenses_date_status_idx", "expense_date", "status"),
+        Index("expenses_category_date_idx", "category", "expense_date"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    expense_date: Mapped[date] = mapped_column(nullable=False)
+    category: Mapped[str] = mapped_column(String(40), nullable=False)
+    description: Mapped[str] = mapped_column(String(200), nullable=False)
+    amount_pkr: Mapped[int] = mapped_column(Integer, nullable=False)
+    vendor: Mapped[str | None] = mapped_column(String(200))
+    notes: Mapped[str | None] = mapped_column(String(1000))
+    status: Mapped[str] = mapped_column(
+        String(20), default="active", server_default="active", nullable=False
+    )
+    created_by_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("admin_users.id", ondelete="RESTRICT"), nullable=False
+    )
+    voided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    voided_by_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("admin_users.id", ondelete="RESTRICT")
     )
 
 

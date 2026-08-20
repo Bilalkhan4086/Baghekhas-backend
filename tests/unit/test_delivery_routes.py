@@ -1,5 +1,5 @@
 import uuid
-from datetime import date
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -13,7 +13,7 @@ from app.models import Order
 from app.schemas.routes import RouteGenerateRequest, RouteNotReceivedRequest
 from app.services.order_transitions import OrderTransitionService
 from app.services.route_optimization import GoogleRouteOptimizer, OptimizationStop
-from app.services.routes import DeliveryRouteService
+from app.services.routes import DeliveryRouteService, admin_route_detail
 
 
 def test_route_generation_requires_one_start_source() -> None:
@@ -105,6 +105,52 @@ def test_route_openapi_requires_idempotency_headers() -> None:
             if parameter["in"] == "header"
         }
         assert headers["Idempotency-Key"]["required"] is True
+
+
+def test_admin_route_detail_includes_stop_coordinates() -> None:
+    now = datetime.now(UTC)
+    order_id = uuid.uuid4()
+    stop = SimpleNamespace(
+        id=uuid.uuid4(),
+        order_id=order_id,
+        sequence=1,
+        status=RouteStopStatus.READY.value,
+        distance_from_previous_meters=1200,
+        estimated_duration_seconds=360,
+        completed_at=None,
+        not_received_reason=None,
+        outcome_note=None,
+        order=SimpleNamespace(
+            order_number="AB2CDE",
+            customer_name_snapshot="Test Customer",
+            delivery_address_snapshot="Street 1, Johar Town, Lahore",
+            delivery_latitude=Decimal("31.469438"),
+            delivery_longitude=Decimal("74.272647"),
+        ),
+    )
+    route = SimpleNamespace(
+        id=uuid.uuid4(),
+        rider_id=uuid.uuid4(),
+        rider=SimpleNamespace(name="Test Rider"),
+        delivery_date=date(2026, 8, 19),
+        status=DeliveryRouteStatus.GENERATED.value,
+        total_distance_meters=1200,
+        estimated_duration_seconds=360,
+        stops=[stop],
+        start_latitude=Decimal("31.460000"),
+        start_longitude=Decimal("74.260000"),
+        start_source="depot",
+        started_at=None,
+        completed_at=None,
+        created_at=now,
+        updated_at=now,
+    )
+
+    response = admin_route_detail(route)
+
+    assert response.stops[0].order_id == order_id
+    assert response.stops[0].latitude == Decimal("31.469438")
+    assert response.stops[0].longitude == Decimal("74.272647")
 
 
 @pytest.mark.asyncio

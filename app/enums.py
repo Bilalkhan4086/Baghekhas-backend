@@ -76,6 +76,24 @@ class WasteReason(StrEnum):
     OTHER = "other"
 
 
+class ExpenseCategory(StrEnum):
+    SALARIES = "salaries"
+    RENT = "rent"
+    UTILITIES = "utilities"
+    FUEL = "fuel"
+    DELIVERY = "delivery"
+    MARKETING = "marketing"
+    MAINTENANCE = "maintenance"
+    PACKAGING = "packaging"
+    TAXES_AND_FEES = "taxes_and_fees"
+    MISCELLANEOUS = "miscellaneous"
+
+
+class ExpenseStatus(StrEnum):
+    ACTIVE = "active"
+    VOIDED = "voided"
+
+
 class InventoryReason(StrEnum):
     OPENING_BALANCE = "opening_balance"
     RESTOCK = "restock"

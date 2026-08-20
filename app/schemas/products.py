@@ -15,6 +15,7 @@ from app.enums import (
 from app.schemas.common import APIModel
 
 Quantity = Annotated[Decimal, Field(max_digits=12, decimal_places=3)]
+MAX_PRODUCT_IMAGES = 8
 
 
 def validate_quantity_precision(value: Decimal) -> Decimal:
@@ -28,10 +29,24 @@ def validate_quantity_precision(value: Decimal) -> Decimal:
     return quantized
 
 
+def validate_product_image_urls(values: list[str]) -> list[str]:
+    normalized = [value.strip() for value in values]
+    if any(not value for value in normalized):
+        raise ValueError("Product image URLs cannot be blank")
+    if any(len(value) > 1000 for value in normalized):
+        raise ValueError("Product image URLs cannot exceed 1000 characters")
+    if len(normalized) > MAX_PRODUCT_IMAGES:
+        raise ValueError(f"A product can have at most {MAX_PRODUCT_IMAGES} images")
+    if len(set(normalized)) != len(normalized):
+        raise ValueError("Product image URLs must be unique")
+    return normalized
+
+
 class ProductBase(APIModel):
     name: str = Field(min_length=1, max_length=200)
     description: str = Field(min_length=1, max_length=5000)
     image_url: str = Field(min_length=1, max_length=1000)
+    image_urls: list[str] | None = Field(default=None, min_length=1, max_length=MAX_PRODUCT_IMAGES)
     category: str | None = Field(default=None, max_length=80)
     catalog_type: CatalogType
     unit_label: str = Field(min_length=1, max_length=40)
@@ -40,6 +55,7 @@ class ProductBase(APIModel):
     compare_at_price_pkr: int | None = Field(default=None, ge=0, le=100_000_000)
     pricing_type: PricingType = PricingType.FIXED
     publication_status: PublicationStatus = PublicationStatus.ACTIVE
+    is_popular: bool = False
     manual_available: bool = True
     low_stock_threshold: Quantity = Decimal("0")
 
@@ -59,6 +75,11 @@ class ProductBase(APIModel):
         stripped = value.strip()
         return stripped or None
 
+    @field_validator("image_urls")
+    @classmethod
+    def validate_images(cls, value: list[str] | None) -> list[str] | None:
+        return validate_product_image_urls(value) if value is not None else None
+
     @field_validator("low_stock_threshold")
     @classmethod
     def validate_threshold(cls, value: Decimal) -> Decimal:
@@ -74,6 +95,10 @@ class ProductBase(APIModel):
             and self.compare_at_price_pkr < self.base_price_pkr
         ):
             raise ValueError("Comparison price cannot be lower than the base price")
+        if self.image_urls is None:
+            self.image_urls = [self.image_url]
+        elif self.image_urls[0] != self.image_url:
+            raise ValueError("image_url must match the first image_urls entry")
         return self
 
 
@@ -95,6 +120,7 @@ class ProductUpdate(APIModel):
     name: str | None = Field(default=None, min_length=1, max_length=200)
     description: str | None = Field(default=None, min_length=1, max_length=5000)
     image_url: str | None = Field(default=None, min_length=1, max_length=1000)
+    image_urls: list[str] | None = Field(default=None, min_length=1, max_length=MAX_PRODUCT_IMAGES)
     category: str | None = Field(default=None, max_length=80)
     catalog_type: CatalogType | None = None
     unit_label: str | None = Field(default=None, min_length=1, max_length=40)
@@ -103,6 +129,7 @@ class ProductUpdate(APIModel):
     compare_at_price_pkr: int | None = Field(default=None, ge=0, le=100_000_000)
     pricing_type: PricingType | None = None
     publication_status: PublicationStatus | None = None
+    is_popular: bool | None = None
     manual_available: bool | None = None
     low_stock_threshold: Quantity | None = None
 
@@ -124,6 +151,11 @@ class ProductUpdate(APIModel):
         stripped = value.strip()
         return stripped or None
 
+    @field_validator("image_urls")
+    @classmethod
+    def validate_images(cls, value: list[str] | None) -> list[str] | None:
+        return validate_product_image_urls(value) if value is not None else None
+
     @field_validator("low_stock_threshold")
     @classmethod
     def validate_threshold(cls, value: Decimal | None) -> Decimal | None:
@@ -142,11 +174,13 @@ class ProductUpdate(APIModel):
             "name",
             "description",
             "image_url",
+            "image_urls",
             "catalog_type",
             "unit_label",
             "base_price_pkr",
             "pricing_type",
             "publication_status",
+            "is_popular",
             "manual_available",
             "low_stock_threshold",
         }
@@ -157,6 +191,12 @@ class ProductUpdate(APIModel):
         )
         if null_fields:
             raise ValueError(f"Fields cannot be null: {', '.join(null_fields)}")
+        if (
+            self.image_urls is not None
+            and self.image_url is not None
+            and self.image_urls[0] != self.image_url
+        ):
+            raise ValueError("image_url must match the first image_urls entry")
         return self
 
 
@@ -205,6 +245,7 @@ class CatalogProductResponse(APIModel):
     name: str
     description: str
     image_url: str
+    image_urls: list[str]
     category: str | None
     catalog_type: CatalogType
     unit_label: str
@@ -213,6 +254,7 @@ class CatalogProductResponse(APIModel):
     compare_at_price_pkr: int | None
     pricing_type: PricingType
     publication_status: PublicationStatus
+    is_popular: bool
     is_available: bool
     availability: Literal["in_stock", "available_on_demand", "unavailable"]
 
