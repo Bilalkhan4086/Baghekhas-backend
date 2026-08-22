@@ -217,6 +217,11 @@ class DeliveryRouteService:
         return GoogleRouteOptimizer(
             self.settings.google_cloud_project_id,
             self.settings.route_optimization_timeout_seconds,
+            api_key=(
+                self.settings.google_route_optimization_api_key.get_secret_value()
+                if self.settings.google_route_optimization_api_key
+                else None
+            ),
         )
 
     @staticmethod

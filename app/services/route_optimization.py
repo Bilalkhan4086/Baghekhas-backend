@@ -10,6 +10,7 @@ from decimal import Decimal
 from typing import Protocol
 from zoneinfo import ZoneInfo
 
+from google.api_core.client_options import ClientOptions
 from google.maps import routeoptimization_v1
 
 from app.exceptions import DomainError
@@ -50,9 +51,16 @@ class RouteOptimizer(Protocol):
 
 
 class GoogleRouteOptimizer:
-    def __init__(self, project_id: str, timeout_seconds: int) -> None:
+    def __init__(
+        self,
+        project_id: str,
+        timeout_seconds: int,
+        *,
+        api_key: str | None = None,
+    ) -> None:
         self.project_id = project_id
         self.timeout_seconds = timeout_seconds
+        self.api_key = api_key
 
     async def optimize(
         self,
@@ -102,7 +110,12 @@ class GoogleRouteOptimizer:
             },
         }
         try:
-            client = routeoptimization_v1.RouteOptimizationAsyncClient()
+            if self.api_key:
+                client = routeoptimization_v1.RouteOptimizationAsyncClient(
+                    client_options=ClientOptions(api_key=self.api_key)
+                )
+            else:
+                client = routeoptimization_v1.RouteOptimizationAsyncClient()
             response = await client.optimize_tours(
                 request=request,
                 timeout=float(self.timeout_seconds + 2),

@@ -51,6 +51,10 @@ class Settings(BaseSettings):
         default=None,
         validation_alias="GOOGLE_CLOUD_PROJECT_ID",
     )
+    google_route_optimization_api_key: SecretStr | None = Field(
+        default=None,
+        validation_alias="GOOGLE_ROUTE_OPTIMIZATION_API_KEY",
+    )
     route_optimization_timeout_seconds: int = Field(
         default=10,
         ge=2,
