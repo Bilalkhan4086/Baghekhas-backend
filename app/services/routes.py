@@ -46,6 +46,7 @@ from app.services.route_optimization import (
     GoogleRouteOptimizer,
     OptimizationStop,
     RouteOptimizer,
+    service_account_credentials_from_base64,
 )
 
 ACTIVE_ROUTE_STATUSES = {
@@ -214,9 +215,16 @@ class DeliveryRouteService:
                 "route_optimization_unconfigured",
                 "Route optimization is not configured",
             )
+        encoded_credentials = self.settings.google_route_optimization_credentials_base64
+        credentials = (
+            service_account_credentials_from_base64(encoded_credentials.get_secret_value())
+            if encoded_credentials
+            else None
+        )
         return GoogleRouteOptimizer(
             self.settings.google_cloud_project_id,
             self.settings.route_optimization_timeout_seconds,
+            credentials=credentials,
         )
 
     @staticmethod

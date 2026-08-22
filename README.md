@@ -60,8 +60,9 @@ inventory operations.
 
 ## Rider route rollout
 
-Apply migration `0018_delivery_routes`, configure Google Application Default Credentials for
-the server process, and set `GOOGLE_CLOUD_PROJECT_ID`. Keep
+Apply migration `0018_delivery_routes` and set `GOOGLE_CLOUD_PROJECT_ID`. On Heroku, provide the
+service-account JSON as `GOOGLE_ROUTE_OPTIMIZATION_CREDENTIALS_BASE64`; other environments can
+leave that variable unset and use Google Application Default Credentials. Keep
 `RIDER_ROUTE_WORKFLOW_ENABLED=false` while the Backend, RiderApp, and Admin Panel compatibility
 release is deployed. Enabling it makes route generation select the authenticated rider's assigned
 `packing + ready_for_dispatch` orders for today and removes direct Admin dispatch from the

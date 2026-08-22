@@ -2,19 +2,55 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
+import json
 import logging
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
-from typing import Protocol
+from typing import Protocol, cast
 from zoneinfo import ZoneInfo
 
+from google.auth.credentials import Credentials
 from google.maps import routeoptimization_v1
+from google.oauth2 import service_account
 
 from app.exceptions import DomainError
 
 logger = logging.getLogger(__name__)
+GOOGLE_CLOUD_PLATFORM_SCOPE = "https://www.googleapis.com/auth/cloud-platform"
+
+
+def service_account_credentials_from_base64(encoded_credentials: str) -> Credentials:
+    """Decode a service-account key without writing it to the filesystem."""
+    try:
+        normalized = "".join(encoded_credentials.split())
+        decoded = base64.b64decode(normalized, validate=True).decode("utf-8")
+        credentials_info = json.loads(decoded)
+        if not isinstance(credentials_info, dict):
+            raise ValueError("Credential JSON must contain an object")
+        if credentials_info.get("type") != "service_account":
+            raise ValueError("Credential JSON must be a service account key")
+        credentials = service_account.Credentials.from_service_account_info(  # type: ignore[no-untyped-call]
+            credentials_info,
+            scopes=[GOOGLE_CLOUD_PLATFORM_SCOPE],
+        )
+        return cast(Credentials, credentials)
+    except (binascii.Error, UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
+        error_type = type(error).__name__
+        error_message = str(error).strip() or "The credential parser returned no error message"
+        logger.exception(
+            "Google Route Optimization credentials could not be loaded (%s): %s",
+            error_type,
+            error_message,
+        )
+        raise DomainError(
+            503,
+            "route_optimization_credentials_invalid",
+            f"Google Route Optimization credentials are invalid ({error_type}): {error_message}",
+        ) from error
 
 
 @dataclass(frozen=True)
@@ -50,9 +86,16 @@ class RouteOptimizer(Protocol):
 
 
 class GoogleRouteOptimizer:
-    def __init__(self, project_id: str, timeout_seconds: int) -> None:
+    def __init__(
+        self,
+        project_id: str,
+        timeout_seconds: int,
+        *,
+        credentials: Credentials | None = None,
+    ) -> None:
         self.project_id = project_id
         self.timeout_seconds = timeout_seconds
+        self.credentials = credentials
 
     async def optimize(
         self,
@@ -102,7 +145,12 @@ class GoogleRouteOptimizer:
             },
         }
         try:
-            client = routeoptimization_v1.RouteOptimizationAsyncClient()
+            if self.credentials is not None:
+                client = routeoptimization_v1.RouteOptimizationAsyncClient(
+                    credentials=self.credentials
+                )
+            else:
+                client = routeoptimization_v1.RouteOptimizationAsyncClient()
             response = await client.optimize_tours(
                 request=request,
                 timeout=float(self.timeout_seconds + 2),
