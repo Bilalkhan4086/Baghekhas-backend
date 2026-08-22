@@ -60,9 +60,8 @@ inventory operations.
 
 ## Rider route rollout
 
-Apply migration `0018_delivery_routes`, set `GOOGLE_CLOUD_PROJECT_ID`, and configure either a
-Route Optimization-restricted `GOOGLE_ROUTE_OPTIMIZATION_API_KEY` or Google Application Default
-Credentials for the server process. Keep
+Apply migration `0018_delivery_routes`, configure Google Application Default Credentials for
+the server process, and set `GOOGLE_CLOUD_PROJECT_ID`. Keep
 `RIDER_ROUTE_WORKFLOW_ENABLED=false` while the Backend, RiderApp, and Admin Panel compatibility
 release is deployed. Enabling it makes route generation select the authenticated rider's assigned
 `packing + ready_for_dispatch` orders for today and removes direct Admin dispatch from the

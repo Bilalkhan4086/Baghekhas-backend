@@ -6,8 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from google.api_core.client_options import ClientOptions
-from pydantic import SecretStr, ValidationError
+from pydantic import ValidationError
 
 from app.enums import DeliveryRouteStatus, RouteStopStatus
 from app.exceptions import DomainError
@@ -46,20 +45,6 @@ def test_route_workflow_hides_direct_dispatch_action() -> None:
     )
 
 
-def test_delivery_route_service_passes_configured_api_key() -> None:
-    settings = SimpleNamespace(
-        google_cloud_project_id="project",
-        google_route_optimization_api_key=SecretStr("test-route-api-key"),
-        route_optimization_timeout_seconds=10,
-    )
-
-    optimizer = DeliveryRouteService(MagicMock(), settings)._optimizer()
-
-    assert isinstance(optimizer, GoogleRouteOptimizer)
-    assert optimizer.api_key == "test-route-api-key"
-    assert "test-route-api-key" not in repr(settings.google_route_optimization_api_key)
-
-
 @pytest.mark.asyncio
 async def test_google_adapter_preserves_provider_stop_order(
     monkeypatch: pytest.MonkeyPatch,
@@ -87,9 +72,6 @@ async def test_google_adapter_preserves_provider_stop_order(
     )
 
     class FakeClient:
-        def __init__(self, *, client_options: ClientOptions) -> None:
-            assert client_options.api_key == "test-route-api-key"
-
         async def optimize_tours(self, **_kwargs: object) -> object:
             return response
 
@@ -97,9 +79,7 @@ async def test_google_adapter_preserves_provider_stop_order(
         "app.services.route_optimization.routeoptimization_v1.RouteOptimizationAsyncClient",
         FakeClient,
     )
-    optimized = await GoogleRouteOptimizer(
-        "project", 10, api_key="test-route-api-key"
-    ).optimize(
+    optimized = await GoogleRouteOptimizer("project", 10).optimize(
         delivery_date=date(2026, 8, 18),
         start_latitude=Decimal("31.469"),
         start_longitude=Decimal("74.272"),
