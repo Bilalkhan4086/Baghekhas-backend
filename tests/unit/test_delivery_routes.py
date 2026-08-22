@@ -1,3 +1,4 @@
+import logging
 import uuid
 from datetime import UTC, date, datetime
 from decimal import Decimal
@@ -8,6 +9,7 @@ import pytest
 from pydantic import ValidationError
 
 from app.enums import DeliveryRouteStatus, RouteStopStatus
+from app.exceptions import DomainError
 from app.main import app
 from app.models import Order
 from app.schemas.routes import RouteGenerateRequest, RouteNotReceivedRequest
@@ -89,6 +91,46 @@ async def test_google_adapter_preserves_provider_stop_order(
     assert [leg.order_id for leg in optimized.legs] == [second_id, first_id]
     assert optimized.total_distance_meters == 2000
     assert optimized.total_duration_seconds == 300
+
+
+@pytest.mark.asyncio
+async def test_google_adapter_exposes_and_logs_provider_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    class FailingClient:
+        async def optimize_tours(self, **_kwargs: object) -> object:
+            raise RuntimeError("Google API permission denied")
+
+    monkeypatch.setattr(
+        "app.services.route_optimization.routeoptimization_v1.RouteOptimizationAsyncClient",
+        FailingClient,
+    )
+
+    with caplog.at_level(logging.ERROR, logger="app.services.route_optimization"):
+        with pytest.raises(DomainError) as caught:
+            await GoogleRouteOptimizer("project", 10).optimize(
+                delivery_date=date(2026, 8, 18),
+                start_latitude=Decimal("31.469"),
+                start_longitude=Decimal("74.272"),
+                stops=[
+                    OptimizationStop(
+                        uuid.uuid4(),
+                        Decimal("31.50"),
+                        Decimal("74.30"),
+                    )
+                ],
+            )
+
+    error = caught.value
+    assert error.status_code == 503
+    assert error.code == "route_optimization_unavailable"
+    assert error.message == (
+        "Google Route Optimization failed (RuntimeError): Google API permission denied"
+    )
+    assert "Google Route Optimization request failed (RuntimeError)" in caplog.text
+    assert "Google API permission denied" in caplog.text
+    assert any(record.exc_info is not None for record in caplog.records)
 
 
 def test_route_openapi_requires_idempotency_headers() -> None:

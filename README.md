@@ -73,6 +73,11 @@ mutations require a UUID `Idempotency-Key`. The server never sends future stops'
 phone numbers after a route starts, and rider history excludes prices, totals, procurement state,
 admin notes, and historical phone details.
 
+When Google Route Optimization cannot be called, route generation keeps the stable
+`route_optimization_unavailable` error code but includes the provider exception type and message in
+the response. The Backend error log records the same diagnostic with its traceback; it does not log
+route coordinates or order identifiers.
+
 ## Tests and checks
 
 ```bash

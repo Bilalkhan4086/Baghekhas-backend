@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
@@ -12,6 +13,8 @@ from zoneinfo import ZoneInfo
 from google.maps import routeoptimization_v1
 
 from app.exceptions import DomainError
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -105,10 +108,17 @@ class GoogleRouteOptimizer:
                 timeout=float(self.timeout_seconds + 2),
             )
         except Exception as error:
+            error_type = type(error).__name__
+            error_message = str(error).strip() or "The provider returned no error message"
+            logger.exception(
+                "Google Route Optimization request failed (%s): %s",
+                error_type,
+                error_message,
+            )
             raise DomainError(
                 503,
                 "route_optimization_unavailable",
-                "Route optimization is temporarily unavailable",
+                f"Google Route Optimization failed ({error_type}): {error_message}",
             ) from error
 
         if response.validation_errors or response.skipped_shipments or len(response.routes) != 1:
