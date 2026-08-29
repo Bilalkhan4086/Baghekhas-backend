@@ -3,9 +3,9 @@ import json
 import re
 import uuid
 from datetime import UTC, datetime, time
-from decimal import ROUND_CEILING, ROUND_HALF_UP, Decimal
+from decimal import ROUND_HALF_UP, Decimal
 from math import asin, cos, radians, sin, sqrt
-from typing import cast
+from typing import NamedTuple, cast
 
 from sqlalchemy import String, func, or_, select, update
 from sqlalchemy import cast as sql_cast
@@ -55,11 +55,27 @@ from app.services.delivery import (
 DELIVERY_ORIGIN_LATITUDE = Decimal("31.469437737970402")
 DELIVERY_ORIGIN_LONGITUDE = Decimal("74.27264727389156")
 FREE_DELIVERY_RADIUS_KM = Decimal("1")
-DELIVERY_TIER_SIZE_KM = Decimal("2")
-DELIVERY_TIER_CHARGE_PKR = 50
 MAXIMUM_DELIVERY_CHARGE_PKR = 350
 EARTH_RADIUS_KM = 6371.0088
 ORDER_NUMBER_GENERATION_ATTEMPTS = 10
+
+
+class DeliveryChargeBand(NamedTuple):
+    over_distance_km: Decimal | None
+    up_to_distance_km: Decimal | None
+    charge_pkr: int
+
+
+DELIVERY_CHARGE_BANDS = (
+    DeliveryChargeBand(None, Decimal("1"), 0),
+    DeliveryChargeBand(Decimal("1"), Decimal("3"), 50),
+    DeliveryChargeBand(Decimal("3"), Decimal("6"), 100),
+    DeliveryChargeBand(Decimal("6"), Decimal("9"), 150),
+    DeliveryChargeBand(Decimal("9"), Decimal("13"), 200),
+    DeliveryChargeBand(Decimal("13"), Decimal("16"), 250),
+    DeliveryChargeBand(Decimal("16"), Decimal("19"), 300),
+    DeliveryChargeBand(Decimal("19"), None, MAXIMUM_DELIVERY_CHARGE_PKR),
+)
 
 
 async def generate_unique_order_number(session: AsyncSession) -> str:
@@ -115,14 +131,10 @@ def calculate_delivery_distance_km(latitude: Decimal, longitude: Decimal) -> Dec
 
 
 def calculate_delivery_charge(distance_km: Decimal) -> int:
-    if distance_km <= FREE_DELIVERY_RADIUS_KM:
-        return 0
-    paid_tiers = int(
-        ((distance_km - FREE_DELIVERY_RADIUS_KM) / DELIVERY_TIER_SIZE_KM).to_integral_value(
-            rounding=ROUND_CEILING
-        )
-    )
-    return min(paid_tiers * DELIVERY_TIER_CHARGE_PKR, MAXIMUM_DELIVERY_CHARGE_PKR)
+    for band in DELIVERY_CHARGE_BANDS:
+        if band.up_to_distance_km is None or distance_km <= band.up_to_distance_km:
+            return band.charge_pkr
+    raise AssertionError("Delivery charge bands must include an unbounded final band")
 
 
 def calculate_delivery_quote(latitude: Decimal, longitude: Decimal) -> tuple[Decimal, int]:

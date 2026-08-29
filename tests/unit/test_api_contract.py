@@ -59,6 +59,15 @@ def test_openapi_contains_public_and_admin_routes() -> None:
     assert "/api/v1/admin/customers/{customer_phone}" in paths
 
 
+def test_delivery_settings_describe_non_uniform_charge_bands() -> None:
+    schema = app.openapi()
+    properties = schema["components"]["schemas"]["DeliverySettingsResponse"]["properties"]
+
+    assert "charge_bands" in properties
+    assert "tier_size_km" not in properties
+    assert "tier_charge_pkr" not in properties
+
+
 def test_delivery_charge_override_is_admin_only() -> None:
     schema = app.openapi()
     paths = schema["paths"]

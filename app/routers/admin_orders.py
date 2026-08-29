@@ -13,6 +13,7 @@ from app.schemas.common import Page
 from app.schemas.orders import (
     AdminOrderCreate,
     CancellationRequest,
+    DeliveryChargeBandResponse,
     DeliveryLocationInput,
     DeliveryQuoteResponse,
     DeliverySettingsResponse,
@@ -29,10 +30,9 @@ from app.schemas.routes import OrderRouteStateResponse
 from app.services.delivery import DeliveryScheduleService, RiderAssignmentService
 from app.services.order_transitions import OrderTransitionService
 from app.services.orders import (
+    DELIVERY_CHARGE_BANDS,
     DELIVERY_ORIGIN_LATITUDE,
     DELIVERY_ORIGIN_LONGITUDE,
-    DELIVERY_TIER_CHARGE_PKR,
-    DELIVERY_TIER_SIZE_KM,
     FREE_DELIVERY_RADIUS_KM,
     MAXIMUM_DELIVERY_CHARGE_PKR,
     calculate_delivery_quote,
@@ -99,8 +99,14 @@ async def get_delivery_settings(_admin: CurrentAdmin) -> DeliverySettingsRespons
         origin_latitude=DELIVERY_ORIGIN_LATITUDE,
         origin_longitude=DELIVERY_ORIGIN_LONGITUDE,
         free_radius_km=FREE_DELIVERY_RADIUS_KM,
-        tier_size_km=DELIVERY_TIER_SIZE_KM,
-        tier_charge_pkr=DELIVERY_TIER_CHARGE_PKR,
+        charge_bands=[
+            DeliveryChargeBandResponse(
+                over_distance_km=band.over_distance_km,
+                up_to_distance_km=band.up_to_distance_km,
+                charge_pkr=band.charge_pkr,
+            )
+            for band in DELIVERY_CHARGE_BANDS
+        ],
         maximum_charge_pkr=MAXIMUM_DELIVERY_CHARGE_PKR,
     )
 

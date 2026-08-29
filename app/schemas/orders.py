@@ -283,12 +283,17 @@ class OrderAdminUpdate(APIModel):
         return self
 
 
+class DeliveryChargeBandResponse(APIModel):
+    over_distance_km: Decimal | None
+    up_to_distance_km: Decimal | None
+    charge_pkr: int
+
+
 class DeliverySettingsResponse(APIModel):
     origin_latitude: Decimal
     origin_longitude: Decimal
     free_radius_km: Decimal
-    tier_size_km: Decimal
-    tier_charge_pkr: int
+    charge_bands: list[DeliveryChargeBandResponse]
     maximum_charge_pkr: int
 
 
